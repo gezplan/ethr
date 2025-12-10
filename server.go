@@ -12,11 +12,98 @@ import (
 	"os"
 	"runtime"
 	"sort"
+	"sync"
 	"sync/atomic"
 	"time"
 )
 
 var gCert []byte
+
+// Per-session stats for multi-client support
+// Each client gets a unique sessionID, and we track stats independently
+type sessionStats struct {
+	sessionID  string
+	remoteIP   string
+	totalBw    uint64 // Total bytes received
+	totalPps   uint64 // Total packets received
+	bw         uint64 // Current interval bandwidth (for display)
+	pps        uint64 // Current interval packets (for display)
+	udpPorts   []int  // UDP source ports for this session
+	lastAccess time.Time
+}
+
+// Global registry mapping sessionID -> sessionStats
+var gSessionStats = make(map[string]*sessionStats)
+var gSessionStatsLock sync.RWMutex
+
+// Global registry mapping "ip:port" -> sessionID for UDP packet lookup
+var gUDPPortToSession = make(map[string]string)
+var gUDPPortToSessionLock sync.RWMutex
+
+// registerSessionStats registers a new session with its UDP ports
+func registerSessionStats(sessionID string, remoteIP string, udpPorts []int) *sessionStats {
+	gSessionStatsLock.Lock()
+	defer gSessionStatsLock.Unlock()
+	
+	stats := &sessionStats{
+		sessionID:  sessionID,
+		remoteIP:   remoteIP,
+		udpPorts:   udpPorts,
+		lastAccess: time.Now(),
+	}
+	gSessionStats[sessionID] = stats
+	
+	// Register UDP port mappings
+	gUDPPortToSessionLock.Lock()
+	for _, port := range udpPorts {
+		key := fmt.Sprintf("%s:%d", remoteIP, port)
+		gUDPPortToSession[key] = sessionID
+		ui.printDbg("Registered UDP port mapping: %s -> session %s", key, sessionID)
+	}
+	gUDPPortToSessionLock.Unlock()
+	
+	ui.printDbg("Registered session %s from %s with %d UDP ports", sessionID, remoteIP, len(udpPorts))
+	return stats
+}
+
+// getSessionStatsByID looks up session stats by sessionID
+func getSessionStatsByID(sessionID string) *sessionStats {
+	gSessionStatsLock.RLock()
+	defer gSessionStatsLock.RUnlock()
+	return gSessionStats[sessionID]
+}
+
+// getSessionStatsByUDPAddr looks up session stats by UDP source address (ip:port)
+func getSessionStatsByUDPAddr(remoteAddr string) *sessionStats {
+	gUDPPortToSessionLock.RLock()
+	sessionID, found := gUDPPortToSession[remoteAddr]
+	gUDPPortToSessionLock.RUnlock()
+	
+	if !found {
+		return nil
+	}
+	return getSessionStatsByID(sessionID)
+}
+
+// unregisterSessionStats removes a session and its port mappings
+func unregisterSessionStats(sessionID string) {
+	gSessionStatsLock.Lock()
+	stats, found := gSessionStats[sessionID]
+	if found {
+		delete(gSessionStats, sessionID)
+	}
+	gSessionStatsLock.Unlock()
+	
+	if found && stats != nil {
+		gUDPPortToSessionLock.Lock()
+		for _, port := range stats.udpPorts {
+			key := fmt.Sprintf("%s:%d", stats.remoteIP, port)
+			delete(gUDPPortToSession, key)
+		}
+		gUDPPortToSessionLock.Unlock()
+		ui.printDbg("Unregistered session %s", sessionID)
+	}
+}
 
 func initServer(showUI bool) {
 	initServerUI(showUI)
@@ -62,7 +149,7 @@ func runServer(serverParam ethrServerParam) {
 	}
 }
 
-func handshakeWithClient(test *ethrTest, conn net.Conn) (testID EthrTestID, clientParam EthrClientParam, err error) {
+func handshakeWithClient(test *ethrTest, conn net.Conn) (testID EthrTestID, clientParam EthrClientParam, sessionID string, err error) {
 	ethrMsg := recvSessionMsg(conn)
 	if ethrMsg.Type != EthrSyn {
 		ui.printDbg("Failed to receive SYN message from client.")
@@ -71,6 +158,7 @@ func handshakeWithClient(test *ethrTest, conn net.Conn) (testID EthrTestID, clie
 	}
 	testID = ethrMsg.Syn.TestID
 	clientParam = ethrMsg.Syn.ClientParam
+	sessionID = ethrMsg.Syn.SessionID
 	ethrMsg = createAckMsg()
 	err = sendSessionMsg(conn, ethrMsg)
 	return
@@ -126,36 +214,67 @@ func handshakeWithClientSync(test *ethrTest, conn net.Conn) (testID EthrTestID, 
 // syncStartWithClient synchronizes the start time for bandwidth tests
 // The server tells the client when its next stats interval starts,
 // and the client aligns to that timing.
-// Returns true if this was a control connection (did sync), false if data-only connection
-func trySyncStartWithClient(test *ethrTest, conn net.Conn) (isControl bool, err error) {
-	// Set a short read deadline to detect if this is a control connection
-	// Control connections send SyncStart immediately after basic handshake
-	// Data connections don't send anything - they just start the bandwidth test
+// Returns: isControl=true if control channel mode, isInBandSync=true if in-band sync mode
+func trySyncStartWithClient(test *ethrTest, conn net.Conn) (isControlChannel bool, sessionID string, err error) {
+	// Set a short read deadline to detect the connection type
 	conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
 	ethrMsg := recvSessionMsg(conn)
 	conn.SetReadDeadline(time.Time{}) // Clear deadline
-	
-	if ethrMsg.Type != EthrSyncStart {
-		// Not a control connection - this is a data connection
-		// It will just do bandwidth test without sync
-		isControl = false
+
+	if ethrMsg.Type == EthrCtrlStart {
+		// This is a control channel connection (iPerf-style)
+		// Return session ID to caller - DON'T store in shared test object!
+		if ethrMsg.CtrlStart != nil {
+			sessionID = ethrMsg.CtrlStart.SessionID
+			
+			// Register session stats for this session (for both TCP and UDP)
+			// This allows data connections to accumulate stats per session
+			server, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
+			registerSessionStats(sessionID, server, ethrMsg.CtrlStart.UDPPorts)
+		}
+		test.ctrlConn = conn
+		isControlChannel = true
+
+		// Now wait for sync start message
+		ethrMsg = recvSessionMsg(conn)
+		if ethrMsg.Type != EthrSyncStart {
+			ui.printDbg("Failed to receive SyncStart message on control channel.")
+			err = os.ErrInvalid
+			return
+		}
+		// Do time sync (same as in-band mode)
+		err = doTimeSync(test, conn)
+		if err != nil {
+			return
+		}
+		// Control channel stays open - caller must handle it
+		// (either call handleControlChannel directly or in a goroutine)
 		return
 	}
-	
-	// This is a control connection - do the sync handshake
-	isControl = true
 
+	if ethrMsg.Type == EthrSyncStart {
+		// In-band sync mode (-ncc on client): sync happens on data connection
+		isControlChannel = false
+		err = doTimeSync(test, conn)
+		return
+	}
+
+	// Not a sync connection - this is a pure data connection
+	isControlChannel = false
+	return
+}
+
+// doTimeSync performs the time synchronization handshake
+func doTimeSync(test *ethrTest, conn net.Conn) (err error) {
 	if gOneClient {
 		// Single-client mode: 3-way handshake to measure RTT
-		// Step 1: Send SyncReady with delay=0 (signals single-client mode)
-		ethrMsg = createSyncReadyMsg(0)
+		ethrMsg := createSyncReadyMsg(0)
 		err = sendSessionMsg(conn, ethrMsg)
 		if err != nil {
 			ui.printDbg("Failed to send SyncReady message to client. Error: %v", err)
 			return
 		}
-		
-		// Step 2: Wait for client to send back RTT measurement
+
 		ethrMsg = recvSessionMsg(conn)
 		if ethrMsg.Type != EthrSyncGo {
 			ui.printDbg("Failed to receive SyncGo message from client.")
@@ -163,44 +282,85 @@ func trySyncStartWithClient(test *ethrTest, conn net.Conn) (isControl bool, err 
 			return
 		}
 		rttNs := ethrMsg.SyncGo.RttNs
-		
-		// Step 3: Sleep RTT/2, then both sides start at the same moment
-		// When client sent SyncGo, it started. That message takes RTT/2 to arrive.
-		// So we sleep RTT/2 after receiving it, and we're synchronized.
+
 		halfRtt := time.Duration(rttNs / 2)
 		time.Sleep(halfRtt)
-		
+
 		startTime := time.Now()
 		test.startTime = startTime
 		startStatsTimerAt(startTime)
 	} else {
 		// Multi-client mode: align to existing stats timer
-		// Account for RTT/2: the delayNs we send should be reduced by RTT/2
-		// because the message takes RTT/2 to reach the client
 		delayNs := getTimeToNextTick()
-		
-		ethrMsg = createSyncReadyMsg(delayNs)
+
+		ethrMsg := createSyncReadyMsg(delayNs)
 		err = sendSessionMsg(conn, ethrMsg)
 		if err != nil {
 			ui.printDbg("Failed to send SyncReady message to client. Error: %v", err)
 			return
 		}
-		
-		// Wait for client to send back RTT (so client can adjust)
+
 		ethrMsg = recvSessionMsg(conn)
 		if ethrMsg.Type != EthrSyncGo {
 			ui.printDbg("Failed to receive SyncGo message from client.")
 			err = os.ErrInvalid
 			return
 		}
-		
-		// In multi-client mode, we just wait for the next tick
-		// Client has already adjusted the delay by RTT/2
+
 		time.Sleep(time.Duration(delayNs))
 		startTime := time.Now()
 		test.startTime = startTime
 	}
 	return
+}
+
+// handleControlChannel handles control channel messages (iPerf-style)
+// This runs in a goroutine while the test is in progress
+func handleControlChannel(test *ethrTest, sessionID string, conn net.Conn) {
+	ui.printDbg("Control channel handler started for test: %v, sessionID: %s", test.testID, sessionID)
+	
+	// Clean up session stats when done
+	defer func() {
+		if sessionID != "" {
+			unregisterSessionStats(sessionID)
+		}
+	}()
+	
+	for {
+		ethrMsg := recvSessionMsg(conn)
+		if ethrMsg.Type == EthrInv {
+			// Connection closed or error
+			ui.printDbg("Control channel: received invalid/closed connection")
+			return
+		}
+
+		switch ethrMsg.Type {
+		case EthrCtrlTestEnd:
+			// Client signals test end - send our cumulative results
+			// For UDP with session tracking, use session stats; otherwise use test stats
+			var totalBw, totalPps uint64
+			sessionStats := getSessionStatsByID(sessionID)
+			if sessionStats != nil {
+				totalBw = atomic.LoadUint64(&sessionStats.totalBw)
+				totalPps = atomic.LoadUint64(&sessionStats.totalPps)
+				ui.printDbg("Control channel: using session stats - totalBw=%d, totalPps=%d", totalBw, totalPps)
+			} else {
+				totalBw = atomic.LoadUint64(&test.testResult.totalBw)
+				totalPps = atomic.LoadUint64(&test.testResult.totalPps)
+				ui.printDbg("Control channel: using test stats - totalBw=%d, totalPps=%d", totalBw, totalPps)
+			}
+			cps := atomic.LoadUint64(&test.testResult.cps)
+			ui.printDbg("Control channel: sending results - totalBw=%d, cps=%d, totalPps=%d", totalBw, cps, totalPps)
+			results := createCtrlResultsMsg(totalBw, cps, totalPps)
+			err := sendSessionMsg(conn, results)
+			if err != nil {
+				ui.printDbg("Control channel: failed to send results: %v", err)
+			}
+			return
+		default:
+			ui.printDbg("Unexpected message type on control channel: %v", ethrMsg.Type)
+		}
+	}
 }
 
 func srvrRunTCPServer() error {
@@ -264,7 +424,7 @@ func srvrHandleNewTcpConn(conn net.Conn) {
 	atomic.AddUint64(&test.testResult.cps, 1)
 
 	// First do the basic handshake to determine test type
-	testID, clientParam, err := handshakeWithClient(test, conn)
+	testID, clientParam, sessionID, err := handshakeWithClient(test, conn)
 	if err != nil {
 		ui.printDbg("Failed in handshake with the client. Error: %v", err)
 		return
@@ -273,22 +433,84 @@ func srvrHandleNewTcpConn(conn net.Conn) {
 	if testID.Protocol == TCP {
 		if testID.Type == Bandwidth {
 			// For bandwidth tests, try to do synchronization
-			// Control connections send SyncStart, data connections don't
-			// This works for multiple clients from same IP and multiple threads
-			_, err = trySyncStartWithClient(test, conn)
+			// Control connections send CtrlStart, in-band sync sends SyncStart, data connections send neither
+			isCtrl, ctrlSessionID, err := trySyncStartWithClient(test, conn)
 			if err != nil {
 				ui.printDbg("Failed to synchronize start time with client. Error: %v", err)
 				return
 			}
-			srvrRunTCPBandwidthTest(test, clientParam, conn)
+			if isCtrl {
+				// This is a control channel - reset cumulative totals for new test session
+				atomic.StoreUint64(&test.testResult.totalBw, 0)
+				atomic.StoreUint64(&test.testResult.totalPps, 0)
+				// Handle control protocol, don't run bandwidth test
+				// handleControlChannel blocks until client sends test end
+				// Pass the session ID directly - don't use test.sessionID which is shared
+				handleControlChannel(test, ctrlSessionID, conn)
+				return
+			}
+			// This is a data connection (or in-band sync first connection) - run bandwidth test
+			// If sessionID is provided, accumulate stats to session for multi-client support
+			srvrRunTCPBandwidthTestWithSession(test, clientParam, conn, sessionID)
 		} else if testID.Type == Latency {
 			ui.emitLatencyHdr()
 			srvrRunTCPLatencyTest(test, clientParam, conn)
 		}
+	} else if testID.Protocol == UDP {
+		// This is a TCP control channel for UDP tests
+		// UDP tests benefit greatly from control channel to report received bandwidth/PPS
+		isCPSorPing = true // Use delayed deletion since UDP data comes separately
+		
+		// For multi-client support, we track UDP stats per client IP
+		// The UDP packets will arrive from the same IP but possibly different ports
+		// We use IP-only lookup since UDP "connection" uses a different source port than control channel
+		udpTest, _ := createOrGetTest(server, UDP, All)
+		if udpTest == nil {
+			ui.printDbg("Failed to create UDP test for control channel")
+			return
+		}
+		
+		// For multi-client from same IP: DON'T reset totals here
+		// Each client's stats are added to the shared test object
+		// This means multi-client from same IP will see aggregate stats
+		// TODO: For true per-client tracking, embed session ID in UDP packets
+		
+		isCtrl, udpSessionID, err := trySyncStartWithClient(udpTest, conn)
+		if err != nil {
+			ui.printDbg("Failed to synchronize start time with UDP test client. Error: %v", err)
+			safeDeleteTest(udpTest)
+			return
+		}
+		
+		if isCtrl {
+			// Control channel mode - handleControlChannel runs in this goroutine
+			// to keep the connection open (defer conn.Close() would close it otherwise)
+			handleControlChannel(udpTest, udpSessionID, conn)
+		}
+		// Note: The UDP test results will be available because srvrRunUDPPacketHandler
+		// writes to the same test object
 	}
 }
 
 func srvrRunTCPBandwidthTest(test *ethrTest, clientParam EthrClientParam, conn net.Conn) {
+	srvrRunTCPBandwidthTestWithSession(test, clientParam, conn, "")
+}
+
+// srvrRunTCPBandwidthTestWithSession runs TCP bandwidth test and accumulates stats
+// If sessionID is provided (multi-client mode), stats are also accumulated to session stats
+func srvrRunTCPBandwidthTestWithSession(test *ethrTest, clientParam EthrClientParam, conn net.Conn, sessionID string) {
+	// Look up session stats if sessionID is provided
+	var sessStats *sessionStats
+	if sessionID != "" {
+		sessStats = getSessionStatsByID(sessionID)
+		if sessStats == nil {
+			ui.printDbg("TCP data connection has sessionID %s but no session stats found - creating one", sessionID)
+			// Create session stats if not exists (shouldn't happen normally - control channel creates it)
+			server, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
+			sessStats = registerSessionStats(sessionID, server, nil)
+		}
+	}
+	
 	size := clientParam.BufferSize
 	buff := make([]byte, size)
 	for i := uint32(0); i < size; i++ {
@@ -310,7 +532,16 @@ func srvrRunTCPBandwidthTest(test *ethrTest, clientParam EthrClientParam, conn n
 			ui.printDbg("Error sending/receiving data on a connection for bandwidth test: %v", err)
 			break
 		}
+		// Always update test stats (for UI display)
 		atomic.AddUint64(&test.testResult.bw, uint64(n))
+		atomic.AddUint64(&test.testResult.totalBw, uint64(n))
+		
+		// Also update session stats if in multi-client mode
+		if sessStats != nil {
+			atomic.AddUint64(&sessStats.bw, uint64(n))
+			atomic.AddUint64(&sessStats.totalBw, uint64(n))
+		}
+		
 		if clientParam.Reverse {
 			sentBytes += uint64(n)
 			start, waitTime, sentBytes, bytesToSend = enforceThrottle(start, waitTime, totalBytesToSend, sentBytes, bufferLen)
@@ -447,9 +678,49 @@ func srvrRunUDPPacketHandler(conn *net.UDPConn) {
 		ethrUnused(remoteIP)
 		ethrUnused(n)
 		server, port, _ := net.SplitHostPort(remoteIP.String())
+		
+		// First, try to look up session stats by IP:port (control channel mode)
+		// This enables accurate per-client tracking even with multiple clients from same IP
+		remoteAddrStr := remoteIP.String()
+		sessionStatsPtr := getSessionStatsByUDPAddr(remoteAddrStr)
+		if sessionStatsPtr != nil {
+			// Found session-based stats - use those
+			sessionStatsPtr.lastAccess = time.Now()
+			atomic.AddUint64(&sessionStatsPtr.pps, 1)
+			atomic.AddUint64(&sessionStatsPtr.bw, uint64(n))
+			atomic.AddUint64(&sessionStatsPtr.totalPps, 1)
+			atomic.AddUint64(&sessionStatsPtr.totalBw, uint64(n))
+			
+			// Also update the test object for UI display (using IP lookup)
+			test, found := tests[server]
+			if !found {
+				var isNew bool
+				test, isNew = createOrGetTest(server, UDP, All)
+				if test != nil {
+					tests[server] = test
+				}
+				if isNew {
+					ui.printDbg("Creating UDP test from server: %v, lastAccess: %v", server, time.Now())
+					ui.emitTestHdr()
+				}
+			}
+			if test != nil {
+				test.isDormant = false
+				test.lastAccess = time.Now()
+				atomic.AddUint64(&test.testResult.pps, 1)
+				atomic.AddUint64(&test.testResult.bw, uint64(n))
+				// Don't update totalPps/totalBw on test object - session stats has those
+			}
+			continue
+		}
+		
+		// Fallback: IP-only lookup (no control channel / -ncc mode)
+		// Note: Multiple clients from same IP will share stats in this mode
+		ethrUnused(port)
 		test, found := tests[server]
 		if !found {
-			test, isNew := createOrGetTest(server, UDP, All)
+			var isNew bool
+			test, isNew = createOrGetTest(server, UDP, All)
 			if test != nil {
 				tests[server] = test
 			}
@@ -463,6 +734,8 @@ func srvrRunUDPPacketHandler(conn *net.UDPConn) {
 			test.lastAccess = time.Now()
 			atomic.AddUint64(&test.testResult.pps, 1)
 			atomic.AddUint64(&test.testResult.bw, uint64(n))
+			atomic.AddUint64(&test.testResult.totalPps, 1)
+			atomic.AddUint64(&test.testResult.totalBw, uint64(n))
 		} else {
 			ui.printDbg("Unable to create test for UDP traffic on port %s from %s port %s", gEthrPortStr, server, port)
 		}

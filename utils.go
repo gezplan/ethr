@@ -105,6 +105,20 @@ func bytesToRate(bytes uint64) string {
 	return result
 }
 
+func bytesToString(bytes uint64) string {
+	// Convert bytes to human-readable format (like iPerf3: "24.5 GBytes")
+	if bytes < 1024 {
+		return fmt.Sprintf("%d Bytes", bytes)
+	} else if bytes < 1024*1024 {
+		return fmt.Sprintf("%.1f KBytes", float64(bytes)/1024)
+	} else if bytes < 1024*1024*1024 {
+		return fmt.Sprintf("%.2f MBytes", float64(bytes)/(1024*1024))
+	} else if bytes < 1024*1024*1024*1024 {
+		return fmt.Sprintf("%.2f GBytes", float64(bytes)/(1024*1024*1024))
+	}
+	return fmt.Sprintf("%.2f TBytes", float64(bytes)/(1024*1024*1024*1024))
+}
+
 func cpsToString(cps uint64) string {
 	result := numberToUnit(cps)
 	return result

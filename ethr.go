@@ -75,6 +75,7 @@ func main() {
 	thCount := flag.Int("n", 1, "")
 	wc := flag.Int("w", 1, "")
 	xClientDest := flag.String("x", "", "")
+	ncc := flag.Bool("ncc", false, "")
 
 	flag.Parse()
 
@@ -111,6 +112,9 @@ func main() {
 		}
 		if *ncs {
 			printServerModeArgError("ncs")
+		}
+		if *ncc {
+			printServerModeArgError("ncc")
 		}
 		if *protocol != "tcp" {
 			printServerModeArgError("p")
@@ -245,7 +249,8 @@ func main() {
 			*gap,
 			uint32(*wc),
 			uint64(bwRate),
-			uint8(*tos)}
+			uint8(*tos),
+			*ncc}
 		validateClientParams(testId, clientParam)
 
 		rServer := destination
@@ -431,6 +436,7 @@ func ethrUsage() {
 	printToSUsage()
 	printWarmupUsage()
 	printTitleUsage()
+	printNoControlChannelUsage()
 
 	fmt.Println("\nMode: External")
 	fmt.Println("================================================================================")
@@ -591,4 +597,13 @@ func printTitleUsage() {
 	printFlagUsage("T", "<string>",
 		"Use the given title in log files for logging results.",
 		"Default: <empty>")
+}
+
+func printNoControlChannelUsage() {
+	printFlagUsage("ncc", "",
+		"No Control Channel. Disable the separate control channel and use",
+		"in-band synchronization on data connections instead.",
+		"Use this option when the server is behind a load balancer, as the",
+		"control channel and data connections may land on different servers.",
+		"Default: Control channel is enabled for richer output (iPerf-style).")
 }

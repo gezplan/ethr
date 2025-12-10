@@ -74,7 +74,14 @@ func initClient(title string) {
 }
 
 func handshakeWithServer(test *ethrTest, conn net.Conn) (err error) {
-	ethrMsg := createSynMsg(test.testID, test.clientParam)
+	var ethrMsg *EthrMsg
+	// If test has a sessionID (from control channel), include it in the SYN
+	// This allows server to track stats per session for multi-client support
+	if test.sessionID != "" {
+		ethrMsg = createSynMsgWithSession(test.testID, test.clientParam, test.sessionID)
+	} else {
+		ethrMsg = createSynMsg(test.testID, test.clientParam)
+	}
 	err = sendSessionMsg(conn, ethrMsg)
 	if err != nil {
 		ui.printDbg("Failed to send SYN message to Ethr server. Error: %v", err)
@@ -221,10 +228,22 @@ func runTest(test *ethrTest) {
 	gap := test.clientParam.Gap
 	duration := test.clientParam.Duration
 	test.isActive = true
+	
+	// Reset cumulative totals for new test
+	atomic.StoreUint64(&test.testResult.totalBw, 0)
+	atomic.StoreUint64(&test.testResult.totalPps, 0)
+	
 	if test.testID.Protocol == TCP {
 		if test.testID.Type == Bandwidth {
-			// For bandwidth tests, use synchronized start
-			tcpRunBandwidthTestSync(test, toStop, duration)
+			if test.clientParam.NoControlChannel {
+				// No control channel mode (-ncc): use in-band sync on data connections
+				// This is useful when server is behind a load balancer
+				tcpRunBandwidthTestInBandSync(test, toStop, duration)
+			} else {
+				// Control channel mode (default): separate control connection for
+				// coordination and results exchange (iPerf-style)
+				tcpRunBandwidthTestWithCtrl(test, toStop, duration)
+			}
 		} else if test.testID.Type == Latency {
 			startStatsTimer()
 			runDurationTimer(duration, toStop)
@@ -251,9 +270,15 @@ func runTest(test *ethrTest) {
 	} else if test.testID.Protocol == UDP {
 		if test.testID.Type == Bandwidth ||
 			test.testID.Type == Pps {
-			startStatsTimer()
-			runDurationTimer(duration, toStop)
-			runUDPBandwidthAndPpsTest(test)
+			if test.clientParam.NoControlChannel {
+				// No control channel mode (-ncc)
+				startStatsTimer()
+				runDurationTimer(duration, toStop)
+				runUDPBandwidthAndPpsTest(test)
+			} else {
+				// Control channel mode (default) - critical for UDP to see server-side receive rate
+				runUDPBandwidthAndPpsTestWithCtrl(test, toStop, duration)
+			}
 		}
 	} else if test.testID.Protocol == ICMP {
 		VerifyPermissionForTest(test.testID)
@@ -292,46 +317,47 @@ func runTest(test *ethrTest) {
 	return
 }
 
-// tcpRunBandwidthTestSync runs bandwidth test with synchronized start time
-// Client aligns to server's stats interval timing
-func tcpRunBandwidthTestSync(test *ethrTest, toStop chan int, duration time.Duration) {
+// tcpRunBandwidthTestInBandSync runs bandwidth test with in-band synchronization
+// This is used when -ncc flag is specified (no separate control channel)
+// Useful when server is behind a load balancer where control/data may hit different servers
+func tcpRunBandwidthTestInBandSync(test *ethrTest, toStop chan int, duration time.Duration) {
 	var wg sync.WaitGroup
 	
-	// Phase 1: Establish control connection and do sync handshake FIRST
-	// This must happen before other connections so server knows this is the control connection
-	controlConn, err := ethrDialInc(TCP, test.dialAddr, 0)
+	// Phase 1: Establish first connection and do sync handshake
+	// This connection does both sync AND data transfer (no separate control channel)
+	firstConn, err := ethrDialInc(TCP, test.dialAddr, 0)
 	if err != nil {
-		ui.printErr("Error dialing control connection: %v", err)
+		ui.printErr("Error dialing connection: %v", err)
 		toStop <- disconnect
 		return
 	}
 
 	// Do basic handshake (SYN/ACK)
-	err = handshakeWithServer(test, controlConn)
+	err = handshakeWithServer(test, firstConn)
 	if err != nil {
 		ui.printErr("Failed in handshake with the server. Error: %v", err)
-		controlConn.Close()
+		firstConn.Close()
 		toStop <- disconnect
 		return
 	}
 
-	// Immediately do sync handshake on control connection
+	// Do sync handshake on first connection
 	sendTime := time.Now()
 	ethrMsg := createSyncStartMsg()
-	err = sendSessionMsg(controlConn, ethrMsg)
+	err = sendSessionMsg(firstConn, ethrMsg)
 	if err != nil {
 		ui.printErr("Failed to send SyncStart message. Error: %v", err)
-		controlConn.Close()
+		firstConn.Close()
 		toStop <- disconnect
 		return
 	}
 
 	// Wait for server's response
-	ethrMsg = recvSessionMsg(controlConn)
+	ethrMsg = recvSessionMsg(firstConn)
 	recvTime := time.Now()
 	if ethrMsg.Type != EthrSyncReady {
 		ui.printErr("Failed to receive SyncReady message from server.")
-		controlConn.Close()
+		firstConn.Close()
 		toStop <- disconnect
 		return
 	}
@@ -345,10 +371,10 @@ func tcpRunBandwidthTestSync(test *ethrTest, toStop chan int, duration time.Dura
 		// Single-client mode: 3-way handshake
 		// Send RTT back to server, then START immediately
 		ethrMsg = createSyncGoMsg(rttNs)
-		err = sendSessionMsg(controlConn, ethrMsg)
+		err = sendSessionMsg(firstConn, ethrMsg)
 		if err != nil {
 			ui.printErr("Failed to send SyncGo message. Error: %v", err)
-			controlConn.Close()
+			firstConn.Close()
 			toStop <- disconnect
 			return
 		}
@@ -365,10 +391,10 @@ func tcpRunBandwidthTestSync(test *ethrTest, toStop chan int, duration time.Dura
 		
 		// Send RTT back to server
 		ethrMsg = createSyncGoMsg(rttNs)
-		err = sendSessionMsg(controlConn, ethrMsg)
+		err = sendSessionMsg(firstConn, ethrMsg)
 		if err != nil {
 			ui.printErr("Failed to send SyncGo message. Error: %v", err)
-			controlConn.Close()
+			firstConn.Close()
 			toStop <- disconnect
 			return
 		}
@@ -379,7 +405,7 @@ func tcpRunBandwidthTestSync(test *ethrTest, toStop chan int, duration time.Dura
 
 	// Phase 2: Establish remaining connections (they skip sync on server side)
 	var connections []net.Conn
-	connections = append(connections, controlConn)
+	connections = append(connections, firstConn)
 	
 	for th := uint32(1); th < test.clientParam.NumThreads; th++ {
 		conn, err := ethrDialInc(TCP, test.dialAddr, uint16(th))
@@ -422,6 +448,268 @@ func tcpRunBandwidthTestSync(test *ethrTest, toStop chan int, duration time.Dura
 		wg.Wait()
 		toStop <- disconnect
 	}()
+}
+
+// tcpRunBandwidthTestWithCtrl runs bandwidth test with a separate control channel (iPerf-style)
+// The control channel is used for:
+// 1. Test parameter exchange and session ID assignment
+// 2. Synchronized test start
+// 3. Results exchange at the end (server sends its measured stats to client)
+func tcpRunBandwidthTestWithCtrl(test *ethrTest, toStop chan int, duration time.Duration) {
+	var wg sync.WaitGroup
+
+	// Phase 1: Establish control connection
+	ctrlConn, err := ethrDial(TCP, test.dialAddr)
+	if err != nil {
+		ui.printErr("Error dialing control connection: %v", err)
+		toStop <- disconnect
+		return
+	}
+	test.ctrlConn = ctrlConn
+
+	// Generate unique session ID
+	sessionID := generateSessionID()
+	test.sessionID = sessionID
+
+	// Do handshake on control connection
+	ethrMsg := createSynMsg(test.testID, test.clientParam)
+	err = sendSessionMsg(ctrlConn, ethrMsg)
+	if err != nil {
+		ui.printErr("Failed to send SYN message on control channel. Error: %v", err)
+		ctrlConn.Close()
+		toStop <- disconnect
+		return
+	}
+
+	ethrMsg = recvSessionMsg(ctrlConn)
+	if ethrMsg.Type != EthrAck {
+		ui.printErr("Failed to receive ACK message from server on control channel.")
+		ctrlConn.Close()
+		toStop <- disconnect
+		return
+	}
+
+	// Send control start message with session ID
+	ethrMsg = createCtrlStartMsg(sessionID)
+	err = sendSessionMsg(ctrlConn, ethrMsg)
+	if err != nil {
+		ui.printErr("Failed to send CtrlStart message. Error: %v", err)
+		ctrlConn.Close()
+		toStop <- disconnect
+		return
+	}
+
+	// Do time sync handshake
+	sendTime := time.Now()
+	ethrMsg = createSyncStartMsg()
+	err = sendSessionMsg(ctrlConn, ethrMsg)
+	if err != nil {
+		ui.printErr("Failed to send SyncStart message on control channel. Error: %v", err)
+		ctrlConn.Close()
+		toStop <- disconnect
+		return
+	}
+
+	ethrMsg = recvSessionMsg(ctrlConn)
+	recvTime := time.Now()
+	if ethrMsg.Type != EthrSyncReady {
+		ui.printErr("Failed to receive SyncReady message from server.")
+		ctrlConn.Close()
+		toStop <- disconnect
+		return
+	}
+	delayNs := ethrMsg.SyncReady.DelayNs
+	rtt := recvTime.Sub(sendTime)
+	rttNs := rtt.Nanoseconds()
+
+	// Calculate start time
+	var startTime time.Time
+	if delayNs == 0 {
+		// Single-client mode
+		ethrMsg = createSyncGoMsg(rttNs)
+		err = sendSessionMsg(ctrlConn, ethrMsg)
+		if err != nil {
+			ui.printErr("Failed to send SyncGo message. Error: %v", err)
+			ctrlConn.Close()
+			toStop <- disconnect
+			return
+		}
+		startTime = time.Now()
+	} else {
+		// Multi-client mode
+		oneWayLatency := rtt / 2
+		adjustedDelay := time.Duration(delayNs) - oneWayLatency
+		if adjustedDelay < 0 {
+			adjustedDelay = 0
+		}
+		startTime = time.Now().Add(adjustedDelay)
+
+		ethrMsg = createSyncGoMsg(rttNs)
+		err = sendSessionMsg(ctrlConn, ethrMsg)
+		if err != nil {
+			ui.printErr("Failed to send SyncGo message. Error: %v", err)
+			ctrlConn.Close()
+			toStop <- disconnect
+			return
+		}
+		waitUntilTime(startTime)
+	}
+
+	// Phase 2: Establish data connections (separate from control)
+	var connections []net.Conn
+	for th := uint32(0); th < test.clientParam.NumThreads; th++ {
+		conn, err := ethrDialInc(TCP, test.dialAddr, uint16(th))
+		if err != nil {
+			ui.printErr("Error dialing data connection: %v", err)
+			continue
+		}
+
+		// Handshake includes session ID so server can associate this with control channel
+		err = handshakeWithServer(test, conn)
+		if err != nil {
+			ui.printErr("Failed in handshake with the server. Error: %v", err)
+			conn.Close()
+			continue
+		}
+		connections = append(connections, conn)
+	}
+
+	if len(connections) == 0 {
+		ui.printErr("No data connections established.")
+		ctrlConn.Close()
+		toStop <- disconnect
+		return
+	}
+
+	// Phase 3: Start all data transfer threads simultaneously
+	startBarrier := make(chan struct{})
+	for _, conn := range connections {
+		wg.Add(1)
+		go func(c net.Conn) {
+			<-startBarrier
+			runTCPBandwidthTestHandler(test, c, &wg)
+		}(conn)
+	}
+
+	test.startTime = startTime
+	startStatsTimerAt(startTime)
+	close(startBarrier)
+
+	// Track whether test completed normally (vs early disconnect)
+	testEnding := make(chan struct{})
+
+	// Wait for duration, then request results BEFORE signaling test completion
+	go func() {
+		// Wait for the test duration
+		time.Sleep(duration)
+		
+		// Signal that we're ending the test intentionally
+		close(testEnding)
+		
+		// Close all data connections first - this signals server to stop reading
+		// and ensures all data is accounted for before we request results
+		for _, conn := range connections {
+			conn.Close()
+		}
+		
+		// Wait for data goroutines to finish
+		wg.Wait()
+		
+		// Wait a bit more for server side to finish processing
+		time.Sleep(200 * time.Millisecond)
+		
+		// Now request results - server has finished counting all data
+		requestServerResults(test, ctrlConn, duration)
+		ctrlConn.Close()
+		
+		// Now signal that test should stop
+		toStop <- timeout
+	}()
+
+	// Also monitor data connections - if they all disconnect early, test ends
+	go func() {
+		wg.Wait()
+		// Only send disconnect if test wasn't ending intentionally
+		select {
+		case <-testEnding:
+			// Test ending normally, don't send disconnect
+		default:
+			toStop <- disconnect
+		}
+	}()
+}
+
+// requestServerResults sends test end signal and receives server's measured results
+func requestServerResults(test *ethrTest, ctrlConn net.Conn, duration time.Duration) {
+	if ctrlConn == nil {
+		ui.printDbg("requestServerResults: ctrlConn is nil")
+		return
+	}
+
+	ui.printDbg("Requesting results from server...")
+	
+	// Send test end message
+	ethrMsg := createCtrlTestEndMsg()
+	err := sendSessionMsg(ctrlConn, ethrMsg)
+	if err != nil {
+		ui.printDbg("Failed to send CtrlTestEnd message. Error: %v", err)
+		return
+	}
+
+	ui.printDbg("Sent CtrlTestEnd, waiting for results...")
+
+	// Receive server results
+	ethrMsg = recvSessionMsg(ctrlConn)
+	ui.printDbg("Received message type: %v", ethrMsg.Type)
+	
+	if ethrMsg.Type == EthrCtrlResults && ethrMsg.CtrlResults != nil {
+		test.ctrlResults = ethrMsg.CtrlResults
+		
+		// Get client-side totals
+		clientTotalBw := atomic.LoadUint64(&test.testResult.totalBw)
+		clientTotalPps := atomic.LoadUint64(&test.testResult.totalPps)
+		serverTotalBw := test.ctrlResults.Bandwidth
+		serverTotalPps := test.ctrlResults.Packets
+		
+		// Calculate rates (total bytes / duration in seconds)
+		durationSecs := duration.Seconds()
+		if durationSecs < 1 {
+			durationSecs = 1
+		}
+		
+		// Display iPerf3-style summary
+		ui.printMsg("- - - - - - - - - - - - - - - - - - - - - - - - -")
+		ui.printMsg("[ ID]   Interval        Transfer     Bitrate")
+		
+		// Sender line (client's transmitted data)
+		ui.printMsg("[SUM]   0.00-%.2f sec   %s    %s  sender",
+			durationSecs,
+			bytesToString(clientTotalBw),
+			bytesToRate(uint64(float64(clientTotalBw)/durationSecs)))
+		
+		// Receiver line (server's received data)
+		ui.printMsg("[SUM]   0.00-%.2f sec   %s    %s  receiver",
+			durationSecs,
+			bytesToString(serverTotalBw),
+			bytesToRate(uint64(float64(serverTotalBw)/durationSecs)))
+		
+		// For UDP tests, also show packet stats
+		if test.testID.Protocol == UDP && (clientTotalPps > 0 || serverTotalPps > 0) {
+			lostPkts := uint64(0)
+			lostPct := 0.0
+			if clientTotalPps > serverTotalPps {
+				lostPkts = clientTotalPps - serverTotalPps
+				lostPct = float64(lostPkts) / float64(clientTotalPps) * 100
+			}
+			ui.printMsg("")
+			ui.printMsg("UDP Statistics:")
+			ui.printMsg("  Sent:     %d packets", clientTotalPps)
+			ui.printMsg("  Received: %d packets", serverTotalPps)
+			ui.printMsg("  Lost:     %d packets (%.2f%%)", lostPkts, lostPct)
+		}
+	} else {
+		ui.printDbg("Failed to receive results from server. Type=%v, CtrlResults=%v", ethrMsg.Type, ethrMsg.CtrlResults)
+	}
 }
 
 func tcpRunBandwidthTest(test *ethrTest, toStop chan int) {
@@ -487,6 +775,7 @@ ExitForLoop:
 			}
 			atomic.AddUint64(&ec.bw, uint64(n))
 			atomic.AddUint64(&test.testResult.bw, uint64(n))
+			atomic.AddUint64(&test.testResult.totalBw, uint64(n))
 			if !test.clientParam.Reverse {
 				sentBytes += uint64(n)
 				start, waitTime, sentBytes, bytesToSend = enforceThrottle(start, waitTime, totalBytesToSend, sentBytes, bufferLen)
@@ -1195,6 +1484,8 @@ func runUDPBandwidthAndPpsTest(test *ethrTest) {
 					atomic.AddUint64(&ec.pps, 1)
 					atomic.AddUint64(&test.testResult.bw, uint64(n))
 					atomic.AddUint64(&test.testResult.pps, 1)
+					atomic.AddUint64(&test.testResult.totalBw, uint64(n))
+					atomic.AddUint64(&test.testResult.totalPps, 1)
 					if !test.clientParam.Reverse {
 						sentBytes += uint64(n)
 						start, waitTime, sentBytes, bytesToSend = enforceThrottle(start, waitTime, totalBytesToSend, sentBytes, bufferLen)
@@ -1202,5 +1493,205 @@ func runUDPBandwidthAndPpsTest(test *ethrTest) {
 				}
 			}
 		}(th)
+	}
+}
+
+// runUDPBandwidthAndPpsTestWithCtrl runs UDP bandwidth/PPS test with control channel
+// Control channel is especially important for UDP because:
+// 1. UDP has no delivery guarantee - packets can be lost silently
+// 2. Client has no idea how many packets actually arrived at server
+// 3. Server's received bandwidth/PPS can be significantly different from client's sent rate
+func runUDPBandwidthAndPpsTestWithCtrl(test *ethrTest, toStop chan int, duration time.Duration) {
+	// Phase 1: Create UDP connections first so we know their source ports
+	numThreads := test.clientParam.NumThreads
+	udpConns := make([]net.Conn, 0, numThreads)
+	udpPorts := make([]int, 0, numThreads)
+	
+	for th := uint32(0); th < numThreads; th++ {
+		conn, err := ethrDialInc(UDP, test.dialAddr, uint16(th))
+		if err != nil {
+			ui.printDbg("Unable to dial UDP for thread %d, error: %v", th, err)
+			// Clean up already created connections
+			for _, c := range udpConns {
+				c.Close()
+			}
+			toStop <- disconnect
+			return
+		}
+		udpConns = append(udpConns, conn)
+		
+		// Extract local port
+		_, lportStr, _ := net.SplitHostPort(conn.LocalAddr().String())
+		var lport int
+		fmt.Sscanf(lportStr, "%d", &lport)
+		udpPorts = append(udpPorts, lport)
+	}
+	
+	ui.printDbg("Created %d UDP connections with ports: %v", len(udpPorts), udpPorts)
+	
+	// Phase 2: Establish TCP control connection
+	ctrlConn, err := ethrDial(TCP, test.dialAddr)
+	if err != nil {
+		ui.printErr("Error dialing control connection: %v", err)
+		for _, c := range udpConns {
+			c.Close()
+		}
+		toStop <- disconnect
+		return
+	}
+	test.ctrlConn = ctrlConn
+
+	// Generate unique session ID
+	sessionID := generateSessionID()
+	test.sessionID = sessionID
+
+	// Do handshake on control connection (TCP for reliability)
+	ethrMsg := createSynMsg(test.testID, test.clientParam)
+	err = sendSessionMsg(ctrlConn, ethrMsg)
+	if err != nil {
+		ui.printErr("Failed to send SYN message on control channel. Error: %v", err)
+		ctrlConn.Close()
+		for _, c := range udpConns {
+			c.Close()
+		}
+		toStop <- disconnect
+		return
+	}
+
+	ethrMsg = recvSessionMsg(ctrlConn)
+	if ethrMsg.Type != EthrAck {
+		ui.printErr("Failed to receive ACK message from server on control channel.")
+		ctrlConn.Close()
+		for _, c := range udpConns {
+			c.Close()
+		}
+		toStop <- disconnect
+		return
+	}
+
+	// Send control start message with session ID and UDP ports
+	ethrMsg = createCtrlStartMsgWithPorts(sessionID, udpPorts)
+	err = sendSessionMsg(ctrlConn, ethrMsg)
+	if err != nil {
+		ui.printErr("Failed to send CtrlStart message. Error: %v", err)
+		ctrlConn.Close()
+		for _, c := range udpConns {
+			c.Close()
+		}
+		toStop <- disconnect
+		return
+	}
+
+	// Do time sync handshake
+	sendTime := time.Now()
+	ethrMsg = createSyncStartMsg()
+	err = sendSessionMsg(ctrlConn, ethrMsg)
+	if err != nil {
+		ui.printErr("Failed to send SyncStart message. Error: %v", err)
+		ctrlConn.Close()
+		for _, c := range udpConns {
+			c.Close()
+		}
+		toStop <- disconnect
+		return
+	}
+
+	ethrMsg = recvSessionMsg(ctrlConn)
+	recvTime := time.Now()
+	if ethrMsg.Type != EthrSyncReady {
+		ui.printErr("Failed to receive SyncReady message from server.")
+		ctrlConn.Close()
+		for _, c := range udpConns {
+			c.Close()
+		}
+		toStop <- disconnect
+		return
+	}
+	delayNs := ethrMsg.SyncReady.DelayNs
+	rtt := recvTime.Sub(sendTime)
+	rttNs := rtt.Nanoseconds()
+
+	var startTime time.Time
+	if delayNs == 0 {
+		ethrMsg = createSyncGoMsg(rttNs)
+		sendSessionMsg(ctrlConn, ethrMsg)
+		startTime = time.Now()
+	} else {
+		oneWayLatency := rtt / 2
+		adjustedDelay := time.Duration(delayNs) - oneWayLatency
+		if adjustedDelay < 0 {
+			adjustedDelay = 0
+		}
+		startTime = time.Now().Add(adjustedDelay)
+		ethrMsg = createSyncGoMsg(rttNs)
+		sendSessionMsg(ctrlConn, ethrMsg)
+		waitUntilTime(startTime)
+	}
+
+	// Phase 3: Start UDP data transfer using pre-created connections
+	test.startTime = startTime
+	startStatsTimerAt(startTime)
+	
+	// Run UDP test with pre-created connections
+	runUDPBandwidthWithConns(test, udpConns)
+
+	// Wait for duration, then request results BEFORE signaling test completion
+	go func() {
+		// Wait for the test duration
+		time.Sleep(duration)
+		// Small extra delay to ensure server has received final packets
+		time.Sleep(200 * time.Millisecond)
+		// Request results from server
+		requestServerResults(test, ctrlConn, duration)
+		ctrlConn.Close()
+		// Now signal that test should stop
+		toStop <- timeout
+	}()
+}
+
+// runUDPBandwidthWithConns runs UDP bandwidth test with pre-created connections
+func runUDPBandwidthWithConns(test *ethrTest, conns []net.Conn) {
+	for th, conn := range conns {
+		go func(th int, conn net.Conn) {
+			defer conn.Close()
+			size := test.clientParam.BufferSize
+			buff := make([]byte, size)
+			ec := test.newConn(conn)
+			rserver, rport, _ := net.SplitHostPort(conn.RemoteAddr().String())
+			lserver, lport, _ := net.SplitHostPort(conn.LocalAddr().String())
+			ui.printMsg("[%3d] local %s port %s connected to %s port %s",
+				ec.fd, lserver, lport, rserver, rport)
+			bufferLen := len(buff)
+			totalBytesToSend := test.clientParam.BwRate
+			sentBytes := uint64(0)
+			start, waitTime, bytesToSend := beginThrottle(totalBytesToSend, bufferLen)
+		ExitForLoop:
+			for {
+				select {
+				case <-test.done:
+					break ExitForLoop
+				default:
+					n, err := conn.Write(buff[:bytesToSend])
+					if err != nil {
+						ui.printDbg("%v", err)
+						continue
+					}
+					if n < bytesToSend {
+						ui.printDbg("Partial write: %d", n)
+						continue
+					}
+					atomic.AddUint64(&ec.bw, uint64(n))
+					atomic.AddUint64(&ec.pps, 1)
+					atomic.AddUint64(&test.testResult.bw, uint64(n))
+					atomic.AddUint64(&test.testResult.pps, 1)
+					atomic.AddUint64(&test.testResult.totalBw, uint64(n))
+					atomic.AddUint64(&test.testResult.totalPps, 1)
+					if !test.clientParam.Reverse {
+						sentBytes += uint64(n)
+						start, waitTime, sentBytes, bytesToSend = enforceThrottle(start, waitTime, totalBytesToSend, sentBytes, bufferLen)
+					}
+				}
+			}
+		}(th, conn)
 	}
 }

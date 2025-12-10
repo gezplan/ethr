@@ -10,6 +10,7 @@ import (
 	"container/list"
 	"encoding/binary"
 	"encoding/gob"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -58,26 +59,35 @@ const (
 	EthrSyncStart  // Client sends sync request to server
 	EthrSyncReady  // Server sends timing info to client
 	EthrSyncGo     // Client sends RTT back, server uses it to sync
+	// Control channel message types (iPerf-style)
+	EthrCtrlStart     // Control: Test is starting
+	EthrCtrlTestEnd   // Control: Test has ended, requesting results
+	EthrCtrlResults   // Control: Results from server
 )
 
 type EthrMsgVer uint32
 
 type EthrMsg struct {
-	Version   EthrMsgVer
-	Type      EthrMsgType
-	Syn       *EthrMsgSyn
-	Ack       *EthrMsgAck
-	SyncStart *EthrMsgSyncStart
-	SyncReady *EthrMsgSyncReady
-	SyncGo    *EthrMsgSyncGo
+	Version     EthrMsgVer
+	Type        EthrMsgType
+	Syn         *EthrMsgSyn
+	Ack         *EthrMsgAck
+	SyncStart   *EthrMsgSyncStart
+	SyncReady   *EthrMsgSyncReady
+	SyncGo      *EthrMsgSyncGo
+	CtrlStart   *EthrMsgCtrlStart
+	CtrlTestEnd *EthrMsgCtrlTestEnd
+	CtrlResults *EthrMsgCtrlResults
 }
 
 type EthrMsgSyn struct {
 	TestID      EthrTestID
 	ClientParam EthrClientParam
+	SessionID   string // Session ID for associating with control channel
 }
 
 type EthrMsgAck struct {
+	SessionID string // Unique session ID for control channel to associate data connections
 }
 
 type EthrMsgSyncStart struct {
@@ -85,12 +95,28 @@ type EthrMsgSyncStart struct {
 }
 
 type EthrMsgSyncReady struct {
-	DelayNs int64  // Nanoseconds until server's next stats interval (multi-client mode)
-	                // In single-client mode: 0 means "measure RTT and send back"
+	DelayNs int64 // Nanoseconds until server's next stats interval (multi-client mode)
+	              // In single-client mode: 0 means "measure RTT and send back"
 }
 
 type EthrMsgSyncGo struct {
-	RttNs int64  // Client's measured RTT in nanoseconds
+	RttNs int64 // Client's measured RTT in nanoseconds
+}
+
+// Control channel message structures (iPerf-style)
+type EthrMsgCtrlStart struct {
+	SessionID string   // Unique session ID to associate data connections
+	UDPPorts  []int    // List of UDP source ports this client will use
+}
+
+type EthrMsgCtrlTestEnd struct {
+	// Empty - signals test completion, requests results
+}
+
+type EthrMsgCtrlResults struct {
+	Bandwidth   uint64 // Server-measured bandwidth in bytes/sec
+	Connections uint64 // Number of connections
+	Packets     uint64 // Packets per second (for UDP)
 }
 
 type ethrTestResult struct {
@@ -99,6 +125,10 @@ type ethrTestResult struct {
 	pps     uint64
 	latency uint64
 	// clatency uint64
+	
+	// Cumulative totals (not reset by stats timer)
+	totalBw  uint64 // Total bytes transferred
+	totalPps uint64 // Total packets
 }
 
 type ethrTest struct {
@@ -116,7 +146,11 @@ type ethrTest struct {
 	done        chan struct{}
 	connList    *list.List
 	lastAccess  time.Time
-	startTime   time.Time  // Track when the test started for sync purposes
+	startTime   time.Time // Track when the test started for sync purposes
+	// Control channel fields
+	sessionID   string              // Unique session ID for control channel
+	ctrlConn    net.Conn            // Control channel connection (nil if -ncc)
+	ctrlResults *EthrMsgCtrlResults // Server results received via control channel
 }
 
 type ethrIPVer uint32
@@ -128,15 +162,16 @@ const (
 )
 
 type EthrClientParam struct {
-	NumThreads  uint32
-	BufferSize  uint32
-	RttCount    uint32
-	Reverse     bool
-	Duration    time.Duration
-	Gap         time.Duration
-	WarmupCount uint32
-	BwRate      uint64
-	ToS         uint8
+	NumThreads       uint32
+	BufferSize       uint32
+	RttCount         uint32
+	Reverse          bool
+	Duration         time.Duration
+	Gap              time.Duration
+	WarmupCount      uint32
+	BwRate           uint64
+	ToS              uint8
+	NoControlChannel bool // When true, use in-band sync instead of separate control channel
 }
 
 type ethrServerParam struct {
@@ -334,6 +369,15 @@ func createSynMsg(testID EthrTestID, clientParam EthrClientParam) (ethrMsg *Ethr
 	return
 }
 
+func createSynMsgWithSession(testID EthrTestID, clientParam EthrClientParam, sessionID string) (ethrMsg *EthrMsg) {
+	ethrMsg = &EthrMsg{Version: 0, Type: EthrSyn}
+	ethrMsg.Syn = &EthrMsgSyn{}
+	ethrMsg.Syn.TestID = testID
+	ethrMsg.Syn.ClientParam = clientParam
+	ethrMsg.Syn.SessionID = sessionID
+	return
+}
+
 func createAckMsg() (ethrMsg *EthrMsg) {
 	ethrMsg = &EthrMsg{Version: 0, Type: EthrAck}
 	ethrMsg.Ack = &EthrMsgAck{}
@@ -356,6 +400,46 @@ func createSyncGoMsg(rttNs int64) (ethrMsg *EthrMsg) {
 	ethrMsg = &EthrMsg{Version: 0, Type: EthrSyncGo}
 	ethrMsg.SyncGo = &EthrMsgSyncGo{RttNs: rttNs}
 	return
+}
+
+// Control channel message creators
+func createAckMsgWithSession(sessionID string) (ethrMsg *EthrMsg) {
+	ethrMsg = &EthrMsg{Version: 0, Type: EthrAck}
+	ethrMsg.Ack = &EthrMsgAck{SessionID: sessionID}
+	return
+}
+
+func createCtrlStartMsg(sessionID string) (ethrMsg *EthrMsg) {
+	ethrMsg = &EthrMsg{Version: 0, Type: EthrCtrlStart}
+	ethrMsg.CtrlStart = &EthrMsgCtrlStart{SessionID: sessionID}
+	return
+}
+
+func createCtrlStartMsgWithPorts(sessionID string, udpPorts []int) (ethrMsg *EthrMsg) {
+	ethrMsg = &EthrMsg{Version: 0, Type: EthrCtrlStart}
+	ethrMsg.CtrlStart = &EthrMsgCtrlStart{SessionID: sessionID, UDPPorts: udpPorts}
+	return
+}
+
+func createCtrlTestEndMsg() (ethrMsg *EthrMsg) {
+	ethrMsg = &EthrMsg{Version: 0, Type: EthrCtrlTestEnd}
+	ethrMsg.CtrlTestEnd = &EthrMsgCtrlTestEnd{}
+	return
+}
+
+func createCtrlResultsMsg(bandwidth, connections, packets uint64) (ethrMsg *EthrMsg) {
+	ethrMsg = &EthrMsg{Version: 0, Type: EthrCtrlResults}
+	ethrMsg.CtrlResults = &EthrMsgCtrlResults{
+		Bandwidth:   bandwidth,
+		Connections: connections,
+		Packets:     packets,
+	}
+	return
+}
+
+// generateSessionID creates a unique session ID for control channel
+func generateSessionID() string {
+	return fmt.Sprintf("%d-%d", time.Now().UnixNano(), os.Getpid())
 }
 
 // getTimeToNextTick returns the nanoseconds until the next stats timer tick
