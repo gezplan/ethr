@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-const defaultLogFileName = "./ethrs.log for server, ./ethrc.log for client"
+const defaultLogFileName = "./ethrs.log for server, ./ethrc.log for client, ./ethrh.log for hub"
 const latencyDefaultBufferLenStr = "1B"
 const defaultBufferLenStr = "16KB"
 
@@ -76,14 +76,8 @@ func main() {
 	wc := flag.Int("w", 1, "")
 	xClientDest := flag.String("x", "", "")
 	ncc := flag.Bool("ncc", false, "")
-	// Agent mode
-	agentOrchestrator := flag.String("a", "", "")
-	agentToken := flag.String("token", "", "")
-	agentNodeID := flag.String("node", "", "")
-	agentTLS := flag.Bool("tls", true, "")
-	agentTLSSkipVerify := flag.Bool("tls-skip-verify", false, "")
-	agentReconnect := flag.Duration("reconnect", 10*time.Second, "")
-	agentHeartbeat := flag.Duration("heartbeat", 30*time.Second, "")
+	// Hub integration mode
+	hubURL := flag.String("hub", "", "")
 
 	flag.Parse()
 
@@ -152,16 +146,13 @@ func main() {
 		if *showUI {
 			printUsageError(fmt.Sprintf("Invalid argument, \"-%s\" can only be used in server (\"-s\") mode.", "ui"))
 		}
-	} else if *agentOrchestrator != "" {
-		// Agent mode - validate agent-specific flags
-		if *agentToken == "" {
-			printUsageError("Agent mode requires an authentication token. Use \"-token\" to specify.")
-		}
+	} else if *hubURL != "" {
+		// Hub integration mode - no other parameters needed
 		if *showUI {
-			printUsageError("Invalid argument, \"-ui\" cannot be used in agent mode.")
+			printUsageError("Invalid argument, \"-ui\" cannot be used in hub mode.")
 		}
 	} else {
-		printUsageError("Invalid arguments, use either \"-s\", \"-c\", or \"-a\".")
+		printUsageError("Invalid arguments, use either \"-s\", \"-c\", or \"-hub\".")
 	}
 
 	// Process common parameters.
@@ -194,8 +185,8 @@ func main() {
 		if logFileName == defaultLogFileName {
 			if *isServer {
 				logFileName = "ethrs.log"
-			} else if *agentOrchestrator != "" {
-				logFileName = "ethra.log"
+			} else if *hubURL != "" {
+				logFileName = "ethrh.log"
 			} else {
 				logFileName = "ethrc.log"
 			}
@@ -210,19 +201,13 @@ func main() {
 		testType = All
 		serverParam := ethrServerParam{showUI: *showUI, oneClient: *oneClient}
 		runServer(serverParam)
-	} else if *agentOrchestrator != "" {
-		// Agent mode - connect to orchestrator and await commands
+	} else if *hubURL != "" {
+		// Hub integration mode - connect to hub and await commands
 		initClient("")
-		agentConfig := AgentConfig{
-			OrchestratorURL: *agentOrchestrator,
-			AuthToken:       *agentToken,
-			NodeID:          *agentNodeID,
-			TLSEnabled:      *agentTLS,
-			TLSSkipVerify:   *agentTLSSkipVerify,
-			ReconnectDelay:  *agentReconnect,
-			HeartbeatInt:    *agentHeartbeat,
+		hubConfig := HubConfig{
+			ServerURL: *hubURL,
 		}
-		runAgent(agentConfig)
+		runHubAgent(hubConfig)
 	} else {
 		gIsExternalClient = false
 		destination = *clientDest
@@ -431,7 +416,7 @@ func ethrUsage() {
 	printFlagUsage("o", "<filename>", "Name of log file. By default, following file names are used:",
 		"Server mode: 'ethrs.log'",
 		"Client mode: 'ethrc.log'",
-		"Agent mode: 'ethra.log'")
+		"Hub mode: 'ethrh.log'")
 	printFlagUsage("debug", "", "Enable debug information in logging output.")
 	printFlagUsage("4", "", "Use only IP v4 version")
 	printFlagUsage("6", "", "Use only IP v6 version")
@@ -486,12 +471,13 @@ func ethrUsage() {
 	printWarmupUsage()
 	printTitleUsage()
 
-	fmt.Println("\nMode: Agent")
+	fmt.Println("\nMode: Hub")
 	fmt.Println("================================================================================")
-	fmt.Println("In this mode, Ethr connects to a central orchestrator service and awaits")
-	fmt.Println("commands to execute tests. Results are reported back to the orchestrator.")
-	fmt.Println("This enables centralized performance data collection across many nodes.")
-	printAgentUsage()
+	fmt.Println("In this mode, Ethr connects to a hub (command center) via device authentication")
+	fmt.Println("and awaits test commands. Tests are executed on demand and detailed results")
+	fmt.Println("(including per-second statistics) are sent back to the hub for storage and")
+	fmt.Println("analysis. This enables centralized control and monitoring of performance tests.")
+	printHubUsage()
 }
 
 func printFlagUsage(flag, info string, helptext ...string) {
@@ -647,21 +633,9 @@ func printNoControlChannelUsage() {
 		"Default: Control channel is enabled for richer output (iPerf-style).")
 }
 
-func printAgentUsage() {
-	printFlagUsage("a", "<orchestrator>", "Run in agent mode and connect to <orchestrator>.",
-		"Orchestrator is specified as host:port (e.g., orchestrator.example.com:9999).",
-		"The agent maintains a persistent connection and executes tests on demand.")
-	printFlagUsage("token", "<auth-token>", "Authentication token (PAT) for the orchestrator.",
-		"Required for agent mode. Obtain this token from your orchestrator admin.",
-		"Example: -token \"eyJhbGciOiJIUzI1NiIs...\"")
-	printFlagUsage("node", "<node-id>", "Optional node identifier for this agent.",
-		"Default: hostname of the machine.")
-	printFlagUsage("tls", "", "Enable TLS for orchestrator connection (default: enabled).",
-		"Use -tls=false to disable TLS for testing purposes.")
-	printFlagUsage("tls-skip-verify", "", "Skip TLS certificate verification.",
-		"Use only for testing with self-signed certificates.")
-	printFlagUsage("reconnect", "<duration>", "Delay between reconnection attempts.",
-		"Format: <num>[ms | s | m | h]. Default: 10s")
-	printFlagUsage("heartbeat", "<duration>", "Interval between heartbeat messages.",
-		"Format: <num>[ms | s | m | h]. Default: 30s")
+func printHubUsage() {
+	printFlagUsage("hub", "<hub-url>", "Run in hub mode and connect to <hub-url>.",
+		"Hub is specified as a URL (e.g., http://hub.example.com:5284).",
+		"Uses OAuth 2.0 device authentication flow for secure access.",
+		"Example: -hub \"http://localhost:5284\"")
 }

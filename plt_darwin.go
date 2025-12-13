@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"net"
+	"os"
 	"syscall"
 
 	tm "github.com/nsf/termbox-go"
