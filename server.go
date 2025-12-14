@@ -186,7 +186,7 @@ func runServer(serverParam ethrServerParam) {
 func handshakeWithClient(test *ethrTest, conn net.Conn) (testID EthrTestID, clientParam EthrClientParam, sessionID string, err error) {
 	ethrMsg := recvSessionMsg(conn)
 	if ethrMsg.Type != EthrSyn {
-		ui.printDbg("Failed to receive SYN message from client.")
+		// No SYN received - likely a CPS test where client just connects/disconnects
 		err = os.ErrInvalid
 		return
 	}
@@ -267,6 +267,10 @@ func trySyncStartWithClient(test *ethrTest, conn net.Conn) (isControlChannel boo
 			registerSessionStats(sessionID, server, ethrMsg.CtrlStart.UDPPorts)
 		}
 		test.ctrlConn = conn
+		
+		// Mark test as active (not dormant) since control channel test is starting
+		test.isDormant = false
+		
 		isControlChannel = true
 
 		// Now wait for sync start message
@@ -370,6 +374,9 @@ func handleControlChannel(test *ethrTest, sessionID string, conn net.Conn) {
 
 		switch ethrMsg.Type {
 		case EthrCtrlTestEnd:
+			// Mark test as dormant immediately to prevent stats from being printed
+			test.isDormant = true
+			
 			// Client signals test end - send our cumulative results
 			// For UDP with session tracking, use session stats; otherwise use test stats
 			var totalBw, totalPps uint64
@@ -383,9 +390,9 @@ func handleControlChannel(test *ethrTest, sessionID string, conn net.Conn) {
 				totalPps = atomic.LoadUint64(&test.testResult.totalPps)
 				ui.printDbg("Control channel: using test stats - totalBw=%d, totalPps=%d", totalBw, totalPps)
 			}
-			cps := atomic.LoadUint64(&test.testResult.cps)
-			ui.printDbg("Control channel: sending results - totalBw=%d, cps=%d, totalPps=%d", totalBw, cps, totalPps)
-			results := createCtrlResultsMsg(totalBw, cps, totalPps)
+			totalCps := atomic.LoadUint64(&test.testResult.totalCps)
+			ui.printDbg("Control channel: sending results - totalBw=%d, totalCps=%d, totalPps=%d", totalBw, totalCps, totalPps)
+			results := createCtrlResultsMsg(totalBw, totalCps, totalPps)
 			err := sendSessionMsg(conn, results)
 			if err != nil {
 				ui.printDbg("Control channel: failed to send results: %v", err)
@@ -403,6 +410,37 @@ func srvrRunTCPServer() error {
 		return err
 	}
 	defer l.Close()
+	
+	// Start a cleanup goroutine for idle TCP tests (similar to UDP)
+	// This is needed for CPS tests where connection handlers don't sleep
+	go func() {
+		for {
+			time.Sleep(500 * time.Millisecond)
+			gSessionLock.Lock()
+			for sessionKey, session := range gSessions {
+				for testKey, test := range session.tests {
+					// Skip tests with control channel - they use deterministic start/end signaling
+					if test.ctrlConn != nil {
+						continue
+					}
+					
+					// Delete TCP tests that have been inactive for > 1.2 seconds
+					// This handles cleanup for CPS tests with minimal extra output (non-control-channel mode only)
+					if testKey.Protocol == TCP && time.Since(test.lastAccess) > (1200 * time.Millisecond) {
+						ui.printDbg("Cleaning up idle TCP test: %v", testKey)
+						delete(session.tests, testKey)
+						session.testCount--
+						if session.testCount == 0 {
+							delete(gSessions, sessionKey)
+							deleteKey(sessionKey)
+						}
+					}
+				}
+			}
+			gSessionLock.Unlock()
+		}
+	}()
+	
 	for {
 		conn, err := l.Accept()
 		if err != nil {
@@ -428,34 +466,18 @@ func srvrHandleNewTcpConn(conn net.Conn) {
 		return
 	}
 	ethrUnused(lserver, lport)
-	ui.printDbg("New connection from %v, port %v to %v, port %v", server, port, lserver, lport)
 
 	test, isNew := createOrGetTest(server, TCP, All)
 	if test == nil {
 		return
 	}
-	if isNew {
-		ui.emitTestHdr(test)
-	}
 
-	isCPSorPing := true
-	// For CPS and Ping tests, there is no deterministic way to know when the test starts
-	// from the client side and when it ends. This defer function ensures that test is not
-	// created/deleted repeatedly by doing a deferred deletion. If another connection
-	// comes with-in 2s, then another reference would be taken on existing test object
-	// and it won't be deleted by safeDeleteTest call. This also ensures, test header is
-	// not printed repeatedly via emitTestHdr.
-	// Note: Similar mechanism is used in UDP tests to handle test lifetime as well.
-	defer func() {
-		if isCPSorPing {
-			time.Sleep(2 * time.Second)
-		}
-		safeDeleteTest(test)
-	}()
-
-	// Always increment CPS count and then check if the test is Bandwidth etc. and handle
-	// those cases as well.
+	// Always increment CPS counters first (both per-interval and total)
 	atomic.AddUint64(&test.testResult.cps, 1)
+	atomic.AddUint64(&test.testResult.totalCps, 1)
+	
+	// Update last access time for proper cleanup
+	test.lastAccess = time.Now()
 
 	// Set a short timeout for handshake to detect CPS-only connections
 	// CPS test clients just open and close connections without sending any data
@@ -464,17 +486,39 @@ func srvrHandleNewTcpConn(conn net.Conn) {
 	// First do the basic handshake to determine test type
 	testID, clientParam, sessionID, err := handshakeWithClient(test, conn)
 	if err != nil {
-		// If handshake fails, this is likely a pure CPS test connection
-		// Just count it (already done above) and return
+		// If handshake fails, this is a pure CPS test connection (no control channel - old style -ncc)
+		// Activate the test if it's the first connection
+		if isNew {
+			test.isDormant = false
+		}
+		// Just count it (already done above) and return immediately without sleeping
+		// The test object remains alive to accumulate CPS stats
+		// Test cleanup happens via the idle test cleanup mechanism in stats.go
 		return
 	}
+	
+	// This is NOT a pure CPS connection - it has a handshake
+	// Use deferred deletion with sleep for proper test lifecycle management
+	isCPSorPing := true
+	defer func() {
+		if isCPSorPing {
+			time.Sleep(2 * time.Second)
+		}
+		safeDeleteTest(test)
+	}()
 	
 	// Clear the deadline for subsequent operations
 	conn.SetReadDeadline(time.Time{})
 	
-	// Print client parameters received
+	// Now we know this is NOT a pure CPS test - print connection info
+	ui.printDbg("New connection from %v, port %v to %v, port %v", server, port, lserver, lport)
+	if isNew {
+		ui.emitTestHdr(test)
+	}
+	
+	// Print client parameters received (only in debug mode)
 	if clientParam.NumThreads > 0 || clientParam.BufferSize > 0 || clientParam.Duration > 0 {
-		ui.printMsg("Client parameters - Threads: %d, BufferSize: %dKB, Duration: %ds, Reverse: %v, BwRate: %d",
+		ui.printDbg("Client parameters - Threads: %d, BufferSize: %dKB, Duration: %ds, Reverse: %v, BwRate: %d",
 			clientParam.NumThreads, clientParam.BufferSize/1024, int(clientParam.Duration.Seconds()), 
 			clientParam.Reverse, clientParam.BwRate)
 	}
@@ -502,6 +546,22 @@ func srvrHandleNewTcpConn(conn net.Conn) {
 			// This is a data connection (or in-band sync first connection) - run bandwidth test
 			// If sessionID is provided, accumulate stats to session for multi-client support
 			srvrRunTCPBandwidthTestWithSession(test, clientParam, conn, sessionID)
+		} else if testID.Type == Cps {
+			// For CPS tests, check if this is a control channel
+			isCtrl, ctrlSessionID, err := trySyncStartWithClient(test, conn)
+			if err != nil {
+				ui.printDbg("Failed to check for control channel. Error: %v", err)
+				return
+			}
+			if isCtrl {
+				// This is a control channel for CPS test - handle control protocol
+				// Reset CPS counter for new test session
+				atomic.StoreUint64(&test.testResult.cps, 0)
+				handleControlChannel(test, ctrlSessionID, conn)
+				return
+			}
+			// This shouldn't happen for CPS tests - connections without handshake are handled earlier
+			ui.printDbg("Unexpected: CPS test with handshake but no control channel")
 		} else if testID.Type == Latency {
 			ui.emitLatencyHdr()
 			srvrRunTCPLatencyTest(test, clientParam, conn)
@@ -549,6 +609,11 @@ func srvrRunTCPBandwidthTest(test *ethrTest, clientParam EthrClientParam, conn n
 // srvrRunTCPBandwidthTestWithSession runs TCP bandwidth test and accumulates stats
 // If sessionID is provided (multi-client mode), stats are also accumulated to session stats
 func srvrRunTCPBandwidthTestWithSession(test *ethrTest, clientParam EthrClientParam, conn net.Conn, sessionID string) {
+	// Activate the test (mark as not dormant) when data connection starts
+	// For control channel tests, this was already done in trySyncStartWithClient
+	// For non-control channel tests (-ncc mode), we need to activate here
+	test.isDormant = false
+	
 	// Look up session stats if sessionID is provided
 	var sessStats *sessionStats
 	if sessionID != "" {
@@ -570,6 +635,10 @@ func srvrRunTCPBandwidthTestWithSession(test *ethrTest, clientParam EthrClientPa
 	totalBytesToSend := test.clientParam.BwRate
 	sentBytes := uint64(0)
 	start, waitTime, bytesToSend := beginThrottle(totalBytesToSend, bufferLen)
+	
+	// Update lastAccess periodically to prevent cleanup goroutine from marking test dormant
+	lastAccessUpdate := time.Now()
+	
 	for {
 		n := 0
 		var err error
@@ -592,6 +661,12 @@ func srvrRunTCPBandwidthTestWithSession(test *ethrTest, clientParam EthrClientPa
 			atomic.AddUint64(&sessStats.totalBw, uint64(n))
 		}
 		
+		// Periodically update lastAccess to keep test active (every ~100ms)
+		if time.Since(lastAccessUpdate) > (100 * time.Millisecond) {
+			test.lastAccess = time.Now()
+			lastAccessUpdate = time.Now()
+		}
+		
 		if clientParam.Reverse {
 			sentBytes += uint64(n)
 			start, waitTime, sentBytes, bytesToSend = enforceThrottle(start, waitTime, totalBytesToSend, sentBytes, bufferLen)
@@ -600,15 +675,26 @@ func srvrRunTCPBandwidthTestWithSession(test *ethrTest, clientParam EthrClientPa
 }
 
 func srvrRunTCPLatencyTest(test *ethrTest, clientParam EthrClientParam, conn net.Conn) {
+	// Activate the test when connection starts
+	test.isDormant = false
+	
 	bytes := make([]byte, clientParam.BufferSize)
 	rttCount := clientParam.RttCount
 	latencyNumbers := make([]time.Duration, rttCount)
+	
+	// Update lastAccess to keep test active
+	test.lastAccess = time.Now()
+	
 	for {
 		_, err := io.ReadFull(conn, bytes)
 		if err != nil {
 			ui.printDbg("Error receiving data for latency test: %v", err)
 			return
 		}
+		
+		// Update lastAccess periodically
+		test.lastAccess = time.Now()
+		
 		for i := uint32(0); i < rttCount; i++ {
 			s1 := time.Now()
 			_, err = conn.Write(bytes)
@@ -706,14 +792,19 @@ func srvrRunUDPPacketHandler(conn *net.UDPConn) {
 		for {
 			time.Sleep(100 * time.Millisecond)
 			for k, v := range tests {
+				// Skip tests with control channel - they use deterministic start/end signaling
+				if v.ctrlConn != nil {
+					continue
+				}
+				
 				// At 200ms of no activity, mark the test in-active so stats stop
-				// printing.
+				// printing (only for non-control-channel tests).
 				if time.Since(v.lastAccess) > (200 * time.Millisecond) {
 					v.isDormant = true
 					ethrUnused(k)
 				}
 				// At 2s of no activity, delete the test by assuming that client
-				// has stopped.
+				// has stopped (only for non-control-channel tests).
 				if time.Since(v.lastAccess) > (2 * time.Second) {
 					ui.printDbg("Deleting UDP test from server: %v, lastAccess: %v", k, v.lastAccess)
 					safeDeleteTest(v)

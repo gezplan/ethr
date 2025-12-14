@@ -462,7 +462,10 @@ func getTestResults(s *ethrSession, proto EthrProtocol, seconds float64) []strin
 			}
 		}
 
-		if test.isDormant && !((bwTestOn && bw != 0) || (cpsTestOn && cps != 0) || (ppsTestOn && pps != 0) || (latTestOn && latency != 0)) {
+		// For CPS tests, print results even if CPS is 0 (as long as test is active and not dormant)
+		// This helps identify issues with connection rate drops
+		// If test is dormant, never print (regardless of current stats)
+		if test.isDormant {
 			return []string{}
 		}
 	}

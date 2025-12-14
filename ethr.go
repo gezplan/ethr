@@ -511,23 +511,23 @@ func printPortUsage() {
 }
 
 func printTestType() {
-	printFlagUsage("t", "<test>", "Test to run (\"b\", \"c\", \"p\", \"l\", \"cl\" or \"tr\")",
-		"b: Bandwidth",
-		"c: Connections/s",
-		"p: Packets/s",
-		"l: Latency, Loss & Jitter",
-		"pi: Ping Loss & Latency",
-		"tr: TraceRoute",
-		"mtr: MyTraceRoute with Loss & Latency",
+	printFlagUsage("t", "<test>", "Test to run (\"b\", \"c\", \"p\", \"l\", \"pi\", \"tr\", or \"mtr\")",
+		"b: Bandwidth (TCP, UDP)",
+		"c: Connections/s (TCP)",
+		"p: Packets/s (UDP)",
+		"l: Latency, Loss & Jitter (TCP, UDP)",
+		"pi: Ping Loss & Latency (TCP)",
+		"tr: TraceRoute (TCP)",
+		"mtr: MyTraceRoute with Loss & Latency (TCP)",
 		"Default: b - Bandwidth measurement.")
 }
 
 func printExtTestType() {
-	printFlagUsage("t", "<test>", "Test to run (\"c\", \"cl\", or \"tr\")",
-		"c: Connections/s",
-		"pi: Ping Loss & Latency",
-		"tr: TraceRoute",
-		"mtr: MyTraceRoute with Loss & Latency",
+	printFlagUsage("t", "<test>", "Test to run (\"c\", \"pi\", \"tr\", or \"mtr\")",
+		"c: Connections/s (TCP)",
+		"pi: Ping Loss & Latency (ICMP, TCP)",
+		"tr: TraceRoute (ICMP, TCP)",
+		"mtr: MyTraceRoute with Loss & Latency (ICMP, TCP)",
 		"Default: pi - Ping Loss & Latency.")
 }
 
@@ -561,13 +561,18 @@ func printBufLenUsage() {
 
 func printProtocolUsage() {
 	printFlagUsage("p", "<protocol>",
-		"Protocol (\"tcp\", \"udp\", \"http\", \"https\", or \"icmp\")",
+		"Protocol (\"tcp\", \"udp\", \"http\", or \"https\")",
+		"tcp: Bandwidth, Connections/s, Latency",
+		"udp: Bandwidth, Packets/s, Latency",
+		"http/https: Bandwidth, Connections/s (client mode only)",
 		"Default: tcp")
 }
 
 func printExtProtocolUsage() {
 	printFlagUsage("p", "<protocol>",
-		"Protocol (\"tcp\", or \"icmp\")",
+		"Protocol (\"tcp\" or \"icmp\")",
+		"tcp: Connections/s, Ping, TraceRoute",
+		"icmp: Ping, TraceRoute, MyTraceRoute (requires admin/root)",
 		"Default: tcp")
 }
 

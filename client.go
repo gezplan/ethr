@@ -249,9 +249,15 @@ func runTest(test *ethrTest) {
 			runDurationTimer(duration, toStop)
 			go runTCPLatencyTest(test, gap, toStop)
 		} else if test.testID.Type == Cps {
-			startStatsTimer()
-			runDurationTimer(duration, toStop)
-			go tcpRunCpsTest(test)
+			if test.clientParam.NoControlChannel {
+				// No control channel mode: pure connection establishment test
+				startStatsTimer()
+				runDurationTimer(duration, toStop)
+				go tcpRunCpsTest(test)
+			} else {
+				// Control channel mode: deterministic test end with results exchange
+				tcpRunCpsTestWithCtrl(test, toStop, duration)
+			}
 		} else if test.testID.Type == Ping {
 			startStatsTimer()
 			runDurationTimer(duration, toStop)
@@ -668,19 +674,36 @@ func requestServerResults(test *ethrTest, ctrlConn net.Conn, duration time.Durat
 	if ethrMsg.Type == EthrCtrlResults && ethrMsg.CtrlResults != nil {
 		test.ctrlResults = ethrMsg.CtrlResults
 		
-		// Get client-side totals
-		clientTotalBw := atomic.LoadUint64(&test.testResult.totalBw)
-		clientTotalPps := atomic.LoadUint64(&test.testResult.totalPps)
-		serverTotalBw := test.ctrlResults.Bandwidth
-		serverTotalPps := test.ctrlResults.Packets
-		
-		// Calculate rates (total bytes / duration in seconds)
+		// Calculate duration in seconds
 		durationSecs := duration.Seconds()
 		if durationSecs < 1 {
 			durationSecs = 1
 		}
 		
-		// Display iPerf3-style summary
+		// Check if this is a CPS test
+		if test.testID.Type == Cps {
+			// CPS-specific summary
+			clientTotalCps := atomic.LoadUint64(&test.testResult.totalCps)
+			serverTotalCps := test.ctrlResults.Connections
+			
+			ui.printMsg("- - - - - - - - - - - - - - - - - - - - - - - - -")
+			ui.printMsg("[ ID]   Interval        Conn/s")
+			ui.printMsg("[SUM]   0.00-%.2f sec   %s  sender",
+				durationSecs,
+				cpsToString(uint64(float64(clientTotalCps)/durationSecs)))
+			ui.printMsg("[SUM]   0.00-%.2f sec   %s  receiver",
+				durationSecs,
+				cpsToString(uint64(float64(serverTotalCps)/durationSecs)))
+			return
+		}
+		
+		// Get client-side totals for bandwidth/PPS tests
+		clientTotalBw := atomic.LoadUint64(&test.testResult.totalBw)
+		clientTotalPps := atomic.LoadUint64(&test.testResult.totalPps)
+		serverTotalBw := test.ctrlResults.Bandwidth
+		serverTotalPps := test.ctrlResults.Packets
+		
+		// Display iPerf3-style summary for bandwidth tests
 		ui.printMsg("- - - - - - - - - - - - - - - - - - - - - - - - -")
 		ui.printMsg("[ ID]   Interval        Transfer     Bitrate")
 		
@@ -890,7 +913,10 @@ func tcpRunCpsTest(test *ethrTest) {
 				default:
 					conn, err := ethrDialAll(TCP, test.dialAddr)
 					if err == nil {
+						// For CPS tests, just connect and disconnect immediately
+						// Don't send any data - this measures pure connection establishment rate
 						atomic.AddUint64(&test.testResult.cps, 1)
+						atomic.AddUint64(&test.testResult.totalCps, 1)
 						tcpconn, ok := conn.(*net.TCPConn)
 						if ok {
 							tcpconn.SetLinger(0)
@@ -902,6 +928,146 @@ func tcpRunCpsTest(test *ethrTest) {
 				}
 			}
 		}(th)
+	}
+}
+
+// tcpRunCpsTestWithCtrl runs CPS test with a control channel for deterministic test end
+func tcpRunCpsTestWithCtrl(test *ethrTest, toStop chan int, duration time.Duration) {
+	// Phase 1: Establish control connection
+	ctrlConn, err := ethrDial(TCP, test.dialAddr)
+	if err != nil {
+		ui.printErr("Error dialing control connection: %v", err)
+		toStop <- disconnect
+		return
+	}
+	test.ctrlConn = ctrlConn
+
+	// Generate unique session ID
+	sessionID := generateSessionID()
+	test.sessionID = sessionID
+
+	// Do handshake on control connection
+	ethrMsg := createSynMsg(test.testID, test.clientParam)
+	err = sendSessionMsg(ctrlConn, ethrMsg)
+	if err != nil {
+		ui.printErr("Failed to send SYN message on control channel. Error: %v", err)
+		ctrlConn.Close()
+		toStop <- disconnect
+		return
+	}
+
+	ethrMsg = recvSessionMsg(ctrlConn)
+	if ethrMsg.Type != EthrAck {
+		ui.printErr("Failed to receive ACK message from server on control channel.")
+		ctrlConn.Close()
+		toStop <- disconnect
+		return
+	}
+
+	// Send control start message with session ID to register this as a CPS test
+	ethrMsg = createCtrlStartMsg(sessionID)
+	err = sendSessionMsg(ctrlConn, ethrMsg)
+	if err != nil {
+		ui.printErr("Failed to send CtrlStart message. Error: %v", err)
+		ctrlConn.Close()
+		toStop <- disconnect
+		return
+	}
+
+	// Do time sync handshake (simplified - CPS doesn't need precise nanosecond sync)
+	sendTime := time.Now()
+	ethrMsg = createSyncStartMsg()
+	err = sendSessionMsg(ctrlConn, ethrMsg)
+	if err != nil {
+		ui.printErr("Failed to send SyncStart message on control channel. Error: %v", err)
+		ctrlConn.Close()
+		toStop <- disconnect
+		return
+	}
+
+	ethrMsg = recvSessionMsg(ctrlConn)
+	recvTime := time.Now()
+	if ethrMsg.Type != EthrSyncReady {
+		ui.printErr("Failed to receive SyncReady message from server.")
+		ctrlConn.Close()
+		toStop <- disconnect
+		return
+	}
+	delayNs := ethrMsg.SyncReady.DelayNs
+	rtt := recvTime.Sub(sendTime)
+	rttNs := rtt.Nanoseconds()
+
+	// Calculate start time
+	var startTime time.Time
+	if delayNs == 0 {
+		// Single-client mode
+		ethrMsg = createSyncGoMsg(rttNs)
+		err = sendSessionMsg(ctrlConn, ethrMsg)
+		if err != nil {
+			ui.printErr("Failed to send SyncGo message. Error: %v", err)
+			ctrlConn.Close()
+			toStop <- disconnect
+			return
+		}
+		startTime = time.Now()
+	} else {
+		// Multi-client mode
+		oneWayLatency := rtt / 2
+		adjustedDelay := time.Duration(delayNs) - oneWayLatency
+		if adjustedDelay < 0 {
+			adjustedDelay = 0
+		}
+		startTime = time.Now().Add(adjustedDelay)
+
+		ethrMsg = createSyncGoMsg(rttNs)
+		err = sendSessionMsg(ctrlConn, ethrMsg)
+		if err != nil {
+			ui.printErr("Failed to send SyncGo message. Error: %v", err)
+			ctrlConn.Close()
+			toStop <- disconnect
+			return
+		}
+		waitUntilTime(startTime)
+	}
+
+	// Phase 2: Start CPS test workers at synchronized time
+	test.startTime = startTime
+	startStatsTimerAt(startTime)
+	for th := uint32(0); th < test.clientParam.NumThreads; th++ {
+		go func(th uint32) {
+		ExitForLoop:
+			for {
+				select {
+				case <-test.done:
+					break ExitForLoop
+				default:
+					conn, err := ethrDialAll(TCP, test.dialAddr)
+					if err == nil {
+						atomic.AddUint64(&test.testResult.cps, 1)
+						atomic.AddUint64(&test.testResult.totalCps, 1)
+						tcpconn, ok := conn.(*net.TCPConn)
+						if ok {
+							tcpconn.SetLinger(0)
+						}
+						conn.Close()
+					} else {
+						ui.printDbg("Unable to dial TCP connection to %s, error: %v", test.dialAddr, err)
+					}
+				}
+			}
+		}(th)
+	}
+
+	// Phase 3: Wait for duration, then signal test end via control channel
+	if duration > 0 {
+		time.Sleep(duration)
+		
+		// Request results from server before stopping
+		requestServerResults(test, ctrlConn, duration)
+		ctrlConn.Close()
+		
+		// Signal test completion - runTest() will close test.done
+		toStop <- timeout
 	}
 }
 
@@ -968,7 +1134,7 @@ func tcpRunPing(test *ethrTest, prefix string) (timeTaken time.Duration, err err
 	timeTaken = time.Since(t0)
 	rserver, rport, _ := net.SplitHostPort(conn.RemoteAddr().String())
 	lserver, lport, _ := net.SplitHostPort(conn.LocalAddr().String())
-	ui.printMsg("[tcp] %sConnection from [%s]:%s to [%s]:%s: %s",
+	ui.printMsg("[tcp] %sConnection from [%s]:%s to [%s]:%s, Time: %s",
 		prefix, lserver, lport, rserver, rport, durationToString(timeTaken))
 	tcpconn, ok := conn.(*net.TCPConn)
 	if ok {

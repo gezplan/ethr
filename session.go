@@ -129,6 +129,7 @@ type ethrTestResult struct {
 	// Cumulative totals (not reset by stats timer)
 	totalBw  uint64 // Total bytes transferred
 	totalPps uint64 // Total packets
+	totalCps uint64 // Total connections
 }
 
 type ethrTest struct {
@@ -308,6 +309,7 @@ func createOrGetTest(remoteIP string, proto EthrProtocol, testType EthrTestType)
 		testID := EthrTestID{proto, testType}
 		test, _ = newTestInternal(remoteIP, testID, EthrClientParam{})
 		test.isActive = true
+		test.isDormant = true  // Start dormant; will be activated by EthrCtrlStart or first data packet
 		test.startTime = time.Now()  // Track when this test started
 	}
 	atomic.AddInt32(&test.refCount, 1)
@@ -467,7 +469,8 @@ func recvSessionMsg(conn net.Conn) (ethrMsg *EthrMsg) {
 	msgBytes := make([]byte, 4)
 	_, err := io.ReadFull(conn, msgBytes)
 	if err != nil {
-		ui.printDbg("Error receiving message on control channel. Error: %v", err)
+		// Connection closed without sending data - this is normal for CPS tests
+		// where clients just connect and disconnect to measure connection rate
 		return
 	}
 	msgSize := binary.BigEndian.Uint32(msgBytes[0:])
@@ -478,7 +481,7 @@ func recvSessionMsg(conn net.Conn) (ethrMsg *EthrMsg) {
 	msgBytes = make([]byte, msgSize)
 	_, err = io.ReadFull(conn, msgBytes)
 	if err != nil {
-		ui.printDbg("Error receiving message on control channel. Error: %v", err)
+		// Connection closed while receiving message
 		return
 	}
 	ethrMsg = decodeMsg(msgBytes)
