@@ -509,6 +509,11 @@ func srvrHandleNewTcpConn(conn net.Conn) {
 		return
 	}
 	
+	// Update test object with actual test type from client
+	// This allows proper reporting to hub/UI
+	test.testID = testID
+	test.clientParam = clientParam
+	
 	// This is NOT a pure CPS connection - it has a handshake
 	// Use deferred deletion with sleep for proper test lifecycle management
 	isCPSorPing := true
