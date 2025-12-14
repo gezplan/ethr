@@ -1010,6 +1010,12 @@ func executeServerMode(serverURL string, sessionId string, cmd TestCommand) {
 				testTypeStr = "pps"
 			case Latency:
 				testTypeStr = "latency"
+			case Ping:
+				testTypeStr = "ping"
+			case TraceRoute:
+				testTypeStr = "traceroute"
+			case MyTraceRoute:
+				testTypeStr = "mytraceroute"
 			}
 			
 			bufferSize := fmt.Sprintf("%dKB", test.clientParam.BufferSize/1024)
@@ -1062,6 +1068,8 @@ func buildTestParams(cmd TestCommand, protocol EthrProtocol, testType EthrTestTy
 	protoStr := "tcp"
 	if protocol == UDP {
 		protoStr = "udp"
+	} else if protocol == ICMP {
+		protoStr = "icmp"
 	}
 	
 	testTypeStr := "bandwidth"
@@ -1074,6 +1082,12 @@ func buildTestParams(cmd TestCommand, protocol EthrProtocol, testType EthrTestTy
 		testTypeStr = "pps"
 	case Latency:
 		testTypeStr = "latency"
+	case Ping:
+		testTypeStr = "ping"
+	case TraceRoute:
+		testTypeStr = "traceroute"
+	case MyTraceRoute:
+		testTypeStr = "mytraceroute"
 	}
 	
 	bufferSize := "16KB"

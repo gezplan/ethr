@@ -457,12 +457,20 @@ func srvrHandleNewTcpConn(conn net.Conn) {
 	// those cases as well.
 	atomic.AddUint64(&test.testResult.cps, 1)
 
+	// Set a short timeout for handshake to detect CPS-only connections
+	// CPS test clients just open and close connections without sending any data
+	conn.SetReadDeadline(time.Now().Add(1 * time.Second))
+	
 	// First do the basic handshake to determine test type
 	testID, clientParam, sessionID, err := handshakeWithClient(test, conn)
 	if err != nil {
-		ui.printDbg("Failed in handshake with the client. Error: %v", err)
+		// If handshake fails, this is likely a pure CPS test connection
+		// Just count it (already done above) and return
 		return
 	}
+	
+	// Clear the deadline for subsequent operations
+	conn.SetReadDeadline(time.Time{})
 	
 	// Print client parameters received
 	if clientParam.NumThreads > 0 || clientParam.BufferSize > 0 || clientParam.Duration > 0 {
