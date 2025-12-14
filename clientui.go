@@ -48,7 +48,7 @@ func (u *clientUI) paint(seconds uint64) {
 func (u *clientUI) emitTestResultBegin() {
 }
 
-func (u *clientUI) emitTestHdr() {
+func (u *clientUI) emitTestHdr(test *ethrTest) {
 	s := []string{"ServerAddress", "Proto", "Bits/s", "Conn/s", "Pkt/s"}
 	fmt.Println("-----------------------------------------------------------")
 	fmt.Printf("%-15s %-5s %7s %7s %7s\n", s[0], s[1], s[2], s[3], s[4])
@@ -146,6 +146,11 @@ func printTestResult(test *ethrTest, seconds float64) {
 		}
 		logResults([]string{test.session.remoteIP, protoToString(test.testID.Protocol),
 			bytesToRate(cbw), "", ppsToString(cpps), ""})
+		
+		// Send stats to hub if callback is set
+		if hubStatsCallback != nil {
+			hubStatsCallback(test.session.remoteIP, test.testID.Protocol, cbw, 0, cpps, 0, test)
+		}
 	} else if test.testID.Type == Cps {
 		if gInterval == 0 {
 			ui.printMsg("- - - - - - - - - - - - - - - - - - ")
@@ -157,6 +162,11 @@ func printTestResult(test *ethrTest, seconds float64) {
 			gInterval, gInterval+1, cpsToString(cps))
 		logResults([]string{test.session.remoteIP, protoToString(test.testID.Protocol),
 			"", cpsToString(cps), "", ""})
+		
+		// Send stats to hub if callback is set
+		if hubStatsCallback != nil {
+			hubStatsCallback(test.session.remoteIP, test.testID.Protocol, 0, cps, 0, 0, test)
+		}
 	} else if test.testID.Type == Pps {
 		if gInterval == 0 {
 			ui.printMsg("- - - - - - - - - - - - - - - - - - - - - - -")
@@ -169,6 +179,11 @@ func printTestResult(test *ethrTest, seconds float64) {
 			gInterval, gInterval+1, bytesToRate(bw), ppsToString(pps))
 		logResults([]string{test.session.remoteIP, protoToString(test.testID.Protocol),
 			bytesToRate(bw), "", ppsToString(pps), ""})
+		
+		// Send stats to hub if callback is set
+		if hubStatsCallback != nil {
+			hubStatsCallback(test.session.remoteIP, test.testID.Protocol, bw, 0, pps, 0, test)
+		}
 	} else if test.testID.Type == MyTraceRoute {
 		if gCurHops > 0 {
 			ui.printMsg("- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - ")

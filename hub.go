@@ -13,15 +13,19 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/signal"
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 )
 
 // Hub integration structures - allows ethr to be controlled by a central hub
 type HubConfig struct {
 	ServerURL string
+	Title     string
 }
 
 type HubAuth struct {
@@ -53,6 +57,7 @@ type AgentRegistrationRequest struct {
 	IpAddress    string   `json:"ipAddress,omitempty"`
 	Platform     string   `json:"platform,omitempty"`
 	Version      string   `json:"version,omitempty"`
+	Title        string   `json:"title,omitempty"`
 	Capabilities []string `json:"capabilities,omitempty"`
 }
 
@@ -71,6 +76,7 @@ type TestCommand struct {
 	Mode             string            `json:"mode"`
 	Protocol         string            `json:"protocol"`
 	TestType         string            `json:"testType"`
+	Title            string            `json:"title,omitempty"`
 	Destination      string            `json:"destination,omitempty"`
 	Port             int               `json:"port"`
 	DurationSeconds  int               `json:"durationSeconds"`
@@ -96,6 +102,22 @@ type TestResult struct {
 	JitterMs          *float64               `json:"jitterMs,omitempty"`
 	PacketLoss        *float64               `json:"packetLoss,omitempty"`
 	Metadata          map[string]interface{} `json:"metadata,omitempty"`
+	// Test parameters (for display in UI)
+	TestParams        *TestParameters        `json:"testParams,omitempty"`
+}
+
+type TestParameters struct {
+	TestType     string `json:"testType"`
+	Protocol     string `json:"protocol"`
+	Threads      int    `json:"threads"`
+	BufferSize   string `json:"bufferSize"`
+	Duration     int    `json:"duration"`
+	Bandwidth    string `json:"bandwidth,omitempty"`
+	Reverse      bool   `json:"reverse"`
+	Destination  string `json:"destination,omitempty"`
+	Port         int    `json:"port,omitempty"`
+	Title        string `json:"title,omitempty"`
+	ClientName   string `json:"clientName,omitempty"`
 }
 
 type ResultSubmissionRequest struct {
@@ -117,7 +139,197 @@ type HeartbeatRequest struct {
 
 var hubAuth *HubAuth
 var hubAgentId string
+var hubAgentTitle string
 var hubHttpClient *http.Client
+
+// Token persistence helpers - per-hub storage
+func getTokensDir() string {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return ".ethr_tokens"
+	}
+	return homeDir + "/.ethr_tokens"
+}
+
+func getHubIdentifier(serverURL string) string {
+	// Create a safe filename from the server URL
+	// Remove protocol and replace special chars with underscores
+	identifier := strings.TrimPrefix(serverURL, "https://")
+	identifier = strings.TrimPrefix(identifier, "http://")
+	identifier = strings.ReplaceAll(identifier, "/", "_")
+	identifier = strings.ReplaceAll(identifier, ":", "_")
+	identifier = strings.ReplaceAll(identifier, ".", "_")
+	return identifier
+}
+
+func getTokenFilePath(serverURL string) string {
+	dir := getTokensDir()
+	hubId := getHubIdentifier(serverURL)
+	return fmt.Sprintf("%s/%s.json", dir, hubId)
+}
+
+func ensureTokensDir() error {
+	dir := getTokensDir()
+	return os.MkdirAll(dir, 0700)
+}
+
+func saveTokens(serverURL, accessToken, refreshToken string, expiresIn int) error {
+	if err := ensureTokensDir(); err != nil {
+		return err
+	}
+	
+	tokenData := map[string]interface{}{
+		"hub_url":       serverURL,
+		"access_token":  accessToken,
+		"refresh_token": refreshToken,
+		"expires_at":    time.Now().Add(time.Duration(expiresIn) * time.Second).Unix(),
+		"saved_at":      time.Now().Unix(),
+	}
+	
+	data, err := json.MarshalIndent(tokenData, "", "  ")
+	if err != nil {
+		return err
+	}
+	
+	return os.WriteFile(getTokenFilePath(serverURL), data, 0600)
+}
+
+// acquireTokenLock acquires an exclusive lock on the token file to prevent
+// race conditions when multiple clients try to refresh simultaneously.
+// Uses cross-platform file-based locking that works on Unix, Windows, and macOS.
+func acquireTokenLock(serverURL string) (string, error) {
+	lockPath := getTokenFilePath(serverURL) + ".lock"
+	
+	// Try to create the lock file exclusively
+	timeout := time.After(10 * time.Second)
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	
+	for {
+		// O_CREATE | O_EXCL ensures atomic creation - fails if file exists
+		lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		if err == nil {
+			// Successfully created lock file
+			// Write our PID to help with debugging
+			fmt.Fprintf(lockFile, "%d\n", os.Getpid())
+			lockFile.Close()
+			ui.printDbg("Token lock acquired")
+			return lockPath, nil
+		}
+		
+		// Lock file already exists, check if it's stale
+		if info, statErr := os.Stat(lockPath); statErr == nil {
+			// If lock file is older than 30 seconds, assume previous process crashed
+			if time.Since(info.ModTime()) > 30*time.Second {
+				ui.printDbg("Removing stale lock file")
+				os.Remove(lockPath)
+				continue
+			}
+		}
+		
+		// Wait and retry
+		select {
+		case <-timeout:
+			return "", fmt.Errorf("timeout waiting for token lock")
+		case <-ticker.C:
+			// Continue loop
+		}
+	}
+}
+
+// releaseTokenLock releases the lock by removing the lock file
+func releaseTokenLock(lockPath string) {
+	if lockPath != "" {
+		os.Remove(lockPath)
+		ui.printDbg("Token lock released")
+	}
+}
+
+func loadTokens(serverURL string) (accessToken, refreshToken string, expiresAt time.Time, err error) {
+	data, err := os.ReadFile(getTokenFilePath(serverURL))
+	if err != nil {
+		return "", "", time.Time{}, err
+	}
+	
+	var tokenData map[string]interface{}
+	if err := json.Unmarshal(data, &tokenData); err != nil {
+		return "", "", time.Time{}, err
+	}
+	
+	accessToken, _ = tokenData["access_token"].(string)
+	refreshToken, _ = tokenData["refresh_token"].(string)
+	expiresAtUnix, _ := tokenData["expires_at"].(float64)
+	expiresAt = time.Unix(int64(expiresAtUnix), 0)
+	
+	return accessToken, refreshToken, expiresAt, nil
+}
+
+func clearTokens(serverURL string) {
+	os.Remove(getTokenFilePath(serverURL))
+}
+
+func listSavedHubs() ([]string, error) {
+	dir := getTokensDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []string{}, nil
+		}
+		return nil, err
+	}
+	
+	var hubs []string
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") {
+			filePath := fmt.Sprintf("%s/%s", dir, entry.Name())
+			data, err := os.ReadFile(filePath)
+			if err != nil {
+				continue
+			}
+			
+			var tokenData map[string]interface{}
+			if err := json.Unmarshal(data, &tokenData); err != nil {
+				continue
+			}
+			
+			if hubURL, ok := tokenData["hub_url"].(string); ok {
+				hubs = append(hubs, hubURL)
+			}
+		}
+	}
+	
+	return hubs, nil
+}
+
+func tryRefreshToken(serverURL string, refreshToken string) (*TokenResponse, error) {
+	reqBody, _ := json.Marshal(map[string]string{
+		"refresh_token": refreshToken,
+	})
+	
+	ui.printDbg("Token refresh request: %s", string(reqBody))
+	
+	resp, err := hubHttpClient.Post(
+		serverURL+"/api/token/refresh",
+		"application/json",
+		bytes.NewBuffer(reqBody),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("refresh failed (HTTP %d): %s", resp.StatusCode, string(body))
+	}
+	
+	var tokenResp TokenResponse
+	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
+		return nil, err
+	}
+	
+	return &tokenResp, nil
+}
 
 func runHubAgent(config HubConfig) {
 	ui.printMsg("Starting hub integration mode...")
@@ -134,30 +346,145 @@ func runHubAgent(config HubConfig) {
 	// Initialize auth
 	hubAuth = &HubAuth{}
 
-	// Perform device authentication flow
-	if err := performDeviceAuth(config.ServerURL); err != nil {
-		ui.printErr("Authentication failed: %v", err)
-		os.Exit(1)
+	// Show information about saved credentials
+	savedHubs, _ := listSavedHubs()
+	if len(savedHubs) > 0 {
+		ui.printDbg("Found saved credentials for %d hub(s)", len(savedHubs))
+		for _, hub := range savedHubs {
+			if hub == config.ServerURL {
+				ui.printDbg("  - %s (current)", hub)
+			} else {
+				ui.printDbg("  - %s", hub)
+			}
+		}
+	}
+
+	// Try to load saved tokens first
+	loadedAccessToken, loadedRefreshToken, expiresAt, err := loadTokens(config.ServerURL)
+	if err == nil && loadedRefreshToken != "" {
+		ui.printMsg("Found saved credentials for this hub, attempting automatic login...")
+		ui.printDbg("Loaded token expires at: %v (in %v)", expiresAt, time.Until(expiresAt))
+		
+		// Check if access token is still valid (with 5 minute buffer, or 30 seconds for short-lived tokens)
+		bufferTime := 5 * time.Minute
+		if time.Until(expiresAt) < 2*time.Minute {
+			// For short-lived tokens (< 2 minutes), use 30 second buffer
+			bufferTime = 30 * time.Second
+		}
+		
+		if time.Now().Before(expiresAt.Add(-bufferTime)) {
+			// Access token is still valid
+			ui.printMsg("Using cached access token (valid for %v more)", time.Until(expiresAt))
+			hubAuth.AccessToken = loadedAccessToken
+			hubAuth.RefreshToken = loadedRefreshToken
+			hubAuth.ExpiresAt = expiresAt
+		} else {
+			// Try to refresh the token
+			ui.printMsg("Access token expired or expiring soon, refreshing...")
+			ui.printDbg("Refresh token: %.20s...", loadedRefreshToken)
+			tokenResp, err := tryRefreshToken(config.ServerURL, loadedRefreshToken)
+			if err == nil {
+				ui.printMsg("Token refreshed successfully")
+				hubAuth.AccessToken = tokenResp.AccessToken
+				hubAuth.RefreshToken = tokenResp.RefreshToken
+				hubAuth.ExpiresAt = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
+				
+				// Save new tokens
+				saveTokens(config.ServerURL, tokenResp.AccessToken, tokenResp.RefreshToken, tokenResp.ExpiresIn)
+				ui.printDbg("New tokens saved, expires at: %v", hubAuth.ExpiresAt)
+			} else {
+				ui.printMsg("Token refresh failed: %v", err)
+				ui.printMsg("Clearing saved credentials and starting new authentication...")
+				clearTokens(config.ServerURL)
+				// Will fall through to device auth below
+				hubAuth = &HubAuth{}
+			}
+		}
+	} else if err != nil {
+		ui.printDbg("No saved credentials for this hub: %v", err)
+	}
+
+	// If no valid tokens, perform device authentication flow
+	if hubAuth.AccessToken == "" {
+		if err := performDeviceAuth(config.ServerURL); err != nil {
+			ui.printErr("Authentication failed: %v", err)
+			os.Exit(1)
+		}
+		
+		// Save tokens after successful auth
+		saveTokens(config.ServerURL, hubAuth.AccessToken, hubAuth.RefreshToken, 3600)
+		ui.printMsg("Credentials saved for future use")
 	}
 
 	ui.printMsg("Authentication successful!")
 
 	// Register agent with hub
-	if err := registerAgent(config.ServerURL); err != nil {
-		ui.printErr("Agent registration failed: %v", err)
-		os.Exit(1)
+	err = registerAgent(config.ServerURL, config.Title)
+	if err != nil {
+		// If registration fails with what looks like an auth error, try refreshing token
+		if strings.Contains(err.Error(), "401") || strings.Contains(err.Error(), "Unauthorized") {
+			ui.printMsg("Registration failed with auth error, attempting token refresh...")
+			
+			hubAuth.mu.RLock()
+			refreshToken := hubAuth.RefreshToken
+			hubAuth.mu.RUnlock()
+			
+			if refreshToken != "" {
+				tokenResp, refreshErr := tryRefreshToken(config.ServerURL, refreshToken)
+				if refreshErr == nil {
+					ui.printMsg("Token refreshed successfully, retrying registration...")
+					hubAuth.mu.Lock()
+					hubAuth.AccessToken = tokenResp.AccessToken
+					hubAuth.RefreshToken = tokenResp.RefreshToken
+					hubAuth.ExpiresAt = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
+					hubAuth.mu.Unlock()
+					
+					// Save new tokens
+					saveTokens(config.ServerURL, tokenResp.AccessToken, tokenResp.RefreshToken, tokenResp.ExpiresIn)
+					
+					// Retry registration
+					err = registerAgent(config.ServerURL, config.Title)
+				} else {
+					ui.printMsg("Token refresh failed: %v", refreshErr)
+					ui.printMsg("Clearing saved credentials and starting new authentication...")
+					clearTokens(config.ServerURL)
+					if err := performDeviceAuth(config.ServerURL); err != nil {
+						ui.printErr("Authentication failed: %v", err)
+						os.Exit(1)
+					}
+					saveTokens(config.ServerURL, hubAuth.AccessToken, hubAuth.RefreshToken, 3600)
+					err = registerAgent(config.ServerURL, config.Title)
+				}
+			}
+		}
+		
+		if err != nil {
+			ui.printErr("Agent registration failed: %v", err)
+			os.Exit(1)
+		}
 	}
 
 	ui.printMsg("Agent registered successfully (ID: %s)", hubAgentId)
 
+	// Set up signal handling for graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	
 	// Start token refresh goroutine
 	go tokenRefreshLoop(config.ServerURL)
 
 	// Start heartbeat goroutine
 	go heartbeatLoop(config.ServerURL)
 
-	// Main command polling loop
-	commandLoop(config.ServerURL)
+	// Start command polling loop in goroutine
+	go commandLoop(config.ServerURL)
+	
+	// Wait for interrupt signal
+	<-sigChan
+	ui.printMsg("\nReceived interrupt signal, shutting down gracefully...")
+	
+	// Clean up and exit
+	os.Exit(0)
 }
 
 func performDeviceAuth(serverURL string) error {
@@ -245,16 +572,53 @@ func performDeviceAuth(serverURL string) error {
 	return fmt.Errorf("device code expired before authorization")
 }
 
-func registerAgent(serverURL string) error {
+func generateFriendlyTitle() string {
+	words1 := []string{
+		"Swift", "Turbo", "Rapid", "Quick", "Flash",
+		"Sonic", "Nitro", "Blaze", "Storm", "Thunder",
+		"Rocket", "Laser", "Plasma", "Quantum", "Cyber",
+		"Hyper", "Ultra", "Mega", "Super", "Alpha",
+	}
+	
+	words2 := []string{
+		"Bolt", "Dash", "Rush", "Blast", "Pulse",
+		"Wave", "Spark", "Flow", "Flux", "Sync",
+		"Link", "Node", "Core", "Edge", "Net",
+		"Hub", "Beam", "Ray", "Peak", "Zone",
+	}
+	
+	// Use timestamp and process ID for better randomness
+	seed := time.Now().UnixNano()
+	pid := os.Getpid()
+	
+	// Use different parts of the seed for each index
+	idx1 := int((seed ^ int64(pid)) % int64(len(words1)))
+	idx2 := int((seed >> 16) % int64(len(words2)))
+	
+	return fmt.Sprintf("%s%s", words1[idx1], words2[idx2])
+}
+
+func registerAgent(serverURL string, title string) error {
 	hostname, _ := os.Hostname()
+	
+	// Auto-generate title if not provided
+	if title == "" {
+		title = generateFriendlyTitle()
+	}
+	
+	// Store title globally for re-registration
+	hubAgentTitle = title
 	
 	req := AgentRegistrationRequest{
 		Hostname:     hostname,
 		IpAddress:    getLocalIP(),
 		Platform:     runtime.GOOS,
 		Version:      gVersion,
+		Title:        title,
 		Capabilities: []string{"bandwidth", "latency", "cps", "pps"},
 	}
+	
+	ui.printMsg("Session Title: %s", title)
 
 	reqBody, _ := json.Marshal(req)
 
@@ -303,25 +667,90 @@ func registerAgent(serverURL string) error {
 }
 
 func tokenRefreshLoop(serverURL string) {
-	for {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	
+	for range ticker.C {
 		hubAuth.mu.RLock()
 		expiresAt := hubAuth.ExpiresAt
 		hubAuth.mu.RUnlock()
 
-		// Refresh 5 minutes before expiry
-		timeToRefresh := time.Until(expiresAt) - (5 * time.Minute)
+		// Calculate refresh buffer based on token lifetime
+		timeUntilExpiry := time.Until(expiresAt)
+		var refreshBuffer time.Duration
+		
+		if timeUntilExpiry < 2*time.Minute {
+			// For short-lived tokens (< 2 minutes), refresh 30 seconds before expiry
+			refreshBuffer = 30 * time.Second
+		} else {
+			// For longer-lived tokens, refresh 5 minutes before expiry
+			refreshBuffer = 5 * time.Minute
+		}
+		
+		timeToRefresh := timeUntilExpiry - refreshBuffer
 		if timeToRefresh > 0 {
-			time.Sleep(timeToRefresh)
+			// Token is still valid, no need to refresh yet
+			continue
+		}
+		
+		ui.printDbg("Token needs refresh (expires in %v)", timeUntilExpiry)
+
+		// Acquire lock to prevent race conditions with multiple clients
+		lockPath, err := acquireTokenLock(serverURL)
+		if err != nil {
+			ui.printErr("Failed to acquire token lock: %v", err)
+			time.Sleep(30 * time.Second)
+			continue
 		}
 
-		// Refresh token
-		hubAuth.mu.RLock()
-		refreshToken := hubAuth.RefreshToken
-		hubAuth.mu.RUnlock()
+		// Reload tokens from disk after acquiring lock
+		// Another client may have already refreshed while we were waiting
+		diskAccessToken, diskRefreshToken, diskExpiresAt, err := loadTokens(serverURL)
+		if err == nil && diskRefreshToken != "" {
+			// Check if the token was recently refreshed by another client
+			timeUntilExpiry := time.Until(diskExpiresAt)
+			var refreshBuffer time.Duration
+			if timeUntilExpiry < 2*time.Minute {
+				refreshBuffer = 30 * time.Second
+			} else {
+				refreshBuffer = 5 * time.Minute
+			}
+			
+			if timeUntilExpiry > refreshBuffer {
+				// Token was already refreshed by another client, use it
+				ui.printDbg("Token was already refreshed by another client (valid for %v more)", timeUntilExpiry)
+				hubAuth.mu.Lock()
+				hubAuth.AccessToken = diskAccessToken
+				hubAuth.RefreshToken = diskRefreshToken
+				hubAuth.ExpiresAt = diskExpiresAt
+				hubAuth.mu.Unlock()
+				releaseTokenLock(lockPath)
+				continue
+			}
+		}
+
+		// Still need to refresh
+		refreshToken := diskRefreshToken
+		if refreshToken == "" {
+			// Fallback to memory if disk load failed
+			hubAuth.mu.RLock()
+			refreshToken = hubAuth.RefreshToken
+			hubAuth.mu.RUnlock()
+		}
+
+		if refreshToken == "" {
+			ui.printErr("Token refresh failed: refresh token is empty")
+			releaseTokenLock(lockPath)
+			time.Sleep(30 * time.Second)
+			continue
+		}
 
 		reqBody, _ := json.Marshal(map[string]string{
 			"refresh_token": refreshToken,
 		})
+
+		ui.printDbg("Token refresh loop - refresh token: %.20s...", refreshToken)
+		ui.printDbg("Token refresh request body: %s", string(reqBody))
 
 		resp, err := hubHttpClient.Post(
 			serverURL+"/api/token/refresh",
@@ -330,6 +759,16 @@ func tokenRefreshLoop(serverURL string) {
 		)
 		if err != nil {
 			ui.printErr("Token refresh failed: %v", err)
+			releaseTokenLock(lockPath)
+			time.Sleep(30 * time.Second)
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			ui.printErr("Token refresh failed (HTTP %d): %s", resp.StatusCode, string(body))
+			releaseTokenLock(lockPath)
 			time.Sleep(30 * time.Second)
 			continue
 		}
@@ -340,6 +779,7 @@ func tokenRefreshLoop(serverURL string) {
 
 		if tokenResp.Error != "" {
 			ui.printErr("Token refresh failed: %s", tokenResp.Error)
+			releaseTokenLock(lockPath)
 			time.Sleep(30 * time.Second)
 			continue
 		}
@@ -350,15 +790,22 @@ func tokenRefreshLoop(serverURL string) {
 		hubAuth.ExpiresAt = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
 		hubAuth.mu.Unlock()
 
+		// Save refreshed tokens to disk
+		saveTokens(serverURL, tokenResp.AccessToken, tokenResp.RefreshToken, tokenResp.ExpiresIn)
+
+		// Release lock after saving
+		releaseTokenLock(lockPath)
+
 		ui.printDbg("Token refreshed successfully")
 	}
 }
 
 func heartbeatLoop(serverURL string) {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
 	for range ticker.C {
+		ui.printDbg("Sending heartbeat...")
 		reqBody, _ := json.Marshal(HeartbeatRequest{
 			AgentId: hubAgentId,
 			Status:  "Connected",
@@ -366,6 +813,7 @@ func heartbeatLoop(serverURL string) {
 
 		httpReq, err := http.NewRequest("POST", serverURL+"/api/cli/agent/heartbeat", bytes.NewBuffer(reqBody))
 		if err != nil {
+			ui.printDbg("Heartbeat request creation failed: %v", err)
 			continue
 		}
 
@@ -379,7 +827,82 @@ func heartbeatLoop(serverURL string) {
 			ui.printDbg("Heartbeat failed: %v", err)
 			continue
 		}
-		resp.Body.Close()
+		
+		if resp.StatusCode == http.StatusUnauthorized {
+			// Token expired, refresh immediately
+			resp.Body.Close()
+			ui.printDbg("Heartbeat failed with 401, refreshing token immediately...")
+			
+			hubAuth.mu.RLock()
+			refreshToken := hubAuth.RefreshToken
+			hubAuth.mu.RUnlock()
+			
+			tokenResp, err := tryRefreshToken(serverURL, refreshToken)
+			if err != nil {
+				// Refresh failed - maybe another process already refreshed?
+				// Try re-reading tokens from disk before giving up
+				ui.printDbg("Refresh failed, re-reading tokens from disk...")
+				accessToken, refreshToken, expiresAt, loadErr := loadTokens(serverURL)
+				if loadErr == nil {
+					hubAuth.mu.Lock()
+					hubAuth.AccessToken = accessToken
+					hubAuth.RefreshToken = refreshToken
+					hubAuth.ExpiresAt = expiresAt
+					hubAuth.mu.Unlock()
+					ui.printDbg("Loaded updated tokens from disk, will retry on next heartbeat")
+					continue
+				}
+				
+				// Still failed - refresh token is invalid (server restarted or token expired)
+				// Clear tokens and re-authenticate
+				ui.printMsg("Refresh token invalid, re-authenticating...")
+				clearTokens(serverURL)
+				
+				if err := performDeviceAuth(serverURL); err != nil {
+					ui.printErr("Re-authentication failed: %v", err)
+					time.Sleep(30 * time.Second)
+					continue
+				}
+				
+				saveTokens(serverURL, hubAuth.AccessToken, hubAuth.RefreshToken, 3600)
+				ui.printMsg("Re-authentication successful")
+				
+				// Also need to re-register since server may have restarted
+				if err := registerAgent(serverURL, hubAgentTitle); err != nil {
+					ui.printErr("Re-registration failed: %v", err)
+					time.Sleep(30 * time.Second)
+					continue
+				}
+				ui.printMsg("Re-registered successfully with new agent ID: %s", hubAgentId)
+				continue
+			}
+			
+			hubAuth.mu.Lock()
+			hubAuth.AccessToken = tokenResp.AccessToken
+			hubAuth.RefreshToken = tokenResp.RefreshToken
+			hubAuth.ExpiresAt = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
+			hubAuth.mu.Unlock()
+			
+			saveTokens(serverURL, tokenResp.AccessToken, tokenResp.RefreshToken, tokenResp.ExpiresIn)
+			ui.printDbg("Token refreshed successfully, next heartbeat will use new token")
+		} else if resp.StatusCode == http.StatusNotFound {
+			// Agent not found (server probably restarted), re-register
+			resp.Body.Close()
+			ui.printMsg("Agent not found on server (server may have restarted), re-registering...")
+			
+			if err := registerAgent(serverURL, hubAgentTitle); err != nil {
+				ui.printErr("Re-registration failed: %v", err)
+			} else {
+				ui.printMsg("Re-registered successfully with new agent ID: %s", hubAgentId)
+			}
+		} else if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			ui.printDbg("Heartbeat failed (HTTP %d): %s", resp.StatusCode, string(body))
+		} else {
+			resp.Body.Close()
+			ui.printDbg("Heartbeat sent successfully")
+		}
 	}
 }
 
@@ -436,51 +959,333 @@ func executeCommand(serverURL string, sessionId string, cmd TestCommand) {
 
 func executeServerMode(serverURL string, sessionId string, cmd TestCommand) {
 	// Start ethr server
-	ui.printMsg("Starting server on port %d", cmd.Port)
+	ui.printMsg("Starting server on port %d (server mode runs indefinitely)", cmd.Port)
 	
-	// This would normally call runServer() but we need to capture stats
-	// For now, send a placeholder result
-	time.Sleep(time.Duration(cmd.DurationSeconds) * time.Second)
+	// Set global port
+	gEthrPort = uint16(cmd.Port)
+	gEthrPortStr = fmt.Sprintf("%d", cmd.Port)
 	
+	// Send initial status
 	sendResult(serverURL, sessionId, TestResult{
 		Timestamp: time.Now(),
 		Source:    "server",
-		Type:      "summary",
+		Type:      "status",
 		Protocol:  cmd.Protocol,
-		Metadata:  map[string]interface{}{"note": "Server mode completed"},
-	}, true)
+		Metadata:  map[string]interface{}{"status": "listening", "port": cmd.Port},
+	}, false)
+	
+	// Set up callback to receive stats from ethr's stats system
+	interval := 1
+	var testParamsSent = make(map[string]bool) // Track if we've sent params for this remote addr
+	hubStatsCallback = func(remoteAddr string, proto EthrProtocol, bw, cps, pps, latency uint64, test *ethrTest) {
+		// Convert to the format expected by the hub
+		bps := int64(bw * 8) // Convert bytes/sec to bits/sec
+		bytes := int64(bw)   // Bytes transferred in this second
+		pkts := int64(pps)
+		cpsVal := int64(cps)
+		
+		result := TestResult{
+			Timestamp:        time.Now(),
+			Source:           "server",
+			Type:             "interval",
+			Protocol:         protoToString(proto),
+			Interval:         &interval,
+			BitsPerSec:       &bps,
+			BytesTransferred: &bytes,
+			PacketsPerSec:    &pkts,
+		}
+		
+		// Include test parameters from client on first interval for each remote address
+		if test != nil && !testParamsSent[remoteAddr] {
+			testParamsSent[remoteAddr] = true
+			
+			// Build test parameters from clientParam received in handshake
+			testTypeStr := "bandwidth"
+			switch test.testID.Type {
+			case Bandwidth:
+				testTypeStr = "bandwidth"
+			case Cps:
+				testTypeStr = "cps"
+			case Pps:
+				testTypeStr = "pps"
+			case Latency:
+				testTypeStr = "latency"
+			}
+			
+			bufferSize := fmt.Sprintf("%dKB", test.clientParam.BufferSize/1024)
+			bandwidth := "unlimited"
+			if test.clientParam.BwRate > 0 {
+				bandwidth = fmt.Sprintf("%d bps", test.clientParam.BwRate)
+			}
+			
+			result.TestParams = &TestParameters{
+				TestType:    testTypeStr,
+				Protocol:    protoToString(proto),
+				Threads:     int(test.clientParam.NumThreads),
+				BufferSize:  bufferSize,
+				Duration:    int(test.clientParam.Duration.Seconds()),
+				Bandwidth:   bandwidth,
+				Reverse:     test.clientParam.Reverse,
+				Destination: remoteAddr, // Client's IP from server's perspective
+				ClientName:  remoteAddr, // Use client IP as name from server perspective
+			}
+		}
+		
+		if cps > 0 {
+			result.ConnectionsPerSec = &cpsVal
+		}
+		
+		if latency > 0 {
+			latencyMs := float64(latency) / 1000.0 // Convert microseconds to milliseconds
+			result.LatencyMs = &latencyMs
+		}
+		
+		sendResult(serverURL, sessionId, result, false)
+		interval++
+	}
+	
+	// Start the actual ethr server
+	// This will automatically use our callback for stats reporting
+	serverParam := ethrServerParam{
+		showUI:    false,
+		oneClient: false,
+	}
+	
+	runServer(serverParam)
+	
+	// Clean up callback when server exits
+	hubStatsCallback = nil
+}
+
+// Helper function to build test parameters for display
+func buildTestParams(cmd TestCommand, protocol EthrProtocol, testType EthrTestType) *TestParameters {
+	protoStr := "tcp"
+	if protocol == UDP {
+		protoStr = "udp"
+	}
+	
+	testTypeStr := "bandwidth"
+	switch testType {
+	case Bandwidth:
+		testTypeStr = "bandwidth"
+	case Cps:
+		testTypeStr = "cps"
+	case Pps:
+		testTypeStr = "pps"
+	case Latency:
+		testTypeStr = "latency"
+	}
+	
+	bufferSize := "16KB"
+	if cmd.BufferSize != "" {
+		bufferSize = cmd.BufferSize
+	}
+	
+	bandwidth := "unlimited"
+	if cmd.Bandwidth != "" {
+		bandwidth = cmd.Bandwidth
+	}
+	
+	// Get client hostname for display
+	clientName, _ := os.Hostname()
+	
+	return &TestParameters{
+		TestType:    testTypeStr,
+		Protocol:    protoStr,
+		Threads:     cmd.Threads,
+		BufferSize:  bufferSize,
+		Duration:    cmd.DurationSeconds,
+		Bandwidth:   bandwidth,
+		Reverse:     cmd.Reverse,
+		Destination: cmd.Destination,
+		Port:        cmd.Port,
+		Title:       cmd.Title,
+		ClientName:  clientName,
+	}
 }
 
 func executeClientMode(serverURL string, sessionId string, cmd TestCommand) {
 	// Start ethr client
-	ui.printMsg("Starting client to %s", cmd.Destination)
+	ui.printMsg("Starting client test to %s:%d", cmd.Destination, cmd.Port)
 	
-	// This would normally call runClient() but we need to capture stats
-	// For now, send placeholder results
-	for i := 0; i < cmd.DurationSeconds; i++ {
-		time.Sleep(1 * time.Second)
-		interval := i + 1
-		bps := int64(1000000000) // 1 Gbps
-		
-		sendResult(serverURL, sessionId, TestResult{
-			Timestamp:    time.Now(),
-			Source:       "client",
-			Type:         "interval",
-			Protocol:     cmd.Protocol,
-			Interval:     &interval,
-			BitsPerSec:   &bps,
-			Metadata:     map[string]interface{}{"interval": i + 1},
-		}, false)
+	// Build test ID from command
+	var protocol EthrProtocol
+	switch cmd.Protocol {
+	case "tcp":
+		protocol = TCP
+	case "udp":
+		protocol = UDP
+	case "icmp":
+		protocol = ICMP
+	default:
+		protocol = TCP
 	}
 	
-	// Send final summary
-	sendResult(serverURL, sessionId, TestResult{
-		Timestamp: time.Now(),
-		Source:    "client",
-		Type:      "summary",
-		Protocol:  cmd.Protocol,
-		Metadata:  map[string]interface{}{"note": "Client test completed"},
-	}, true)
+	var testType EthrTestType
+	switch cmd.TestType {
+	case "b":
+		testType = Bandwidth
+	case "c":
+		testType = Cps
+	case "p":
+		testType = Pps
+	case "l":
+		testType = Latency
+	default:
+		testType = Bandwidth
+	}
+	
+	testID := EthrTestID{
+		Type:     testType,
+		Protocol: protocol,
+	}
+	
+	// Build client parameters
+	clientParam := EthrClientParam{
+		NumThreads: uint32(cmd.Threads),
+		BufferSize: 16 * 1024, // Default 16KB
+		Duration:   time.Duration(cmd.DurationSeconds) * time.Second,
+		Reverse:    cmd.Reverse,
+	}
+	
+	if cmd.BufferSize != "" {
+		// Parse buffer size if provided
+		// For now use default
+	}
+	
+	if cmd.Bandwidth != "" {
+		// Parse bandwidth limit if provided
+		// For now ignore
+	}
+	
+	// Build test parameters for display (before goroutine so we can use it in results)
+	testParams := buildTestParams(cmd, protocol, testType)
+	
+	// Create server address
+	server := fmt.Sprintf("%s:%d", cmd.Destination, cmd.Port)
+	
+	// Run client test in a goroutine and capture stats
+	go func() {
+		var test *ethrTest
+		var testStarted bool
+		defer func() {
+			// Always send summary and cleanup when test exits (normal or interrupted)
+			if test != nil && testStarted {
+				totalBw := atomic.LoadUint64(&test.testResult.totalBw)
+				totalPps := atomic.LoadUint64(&test.testResult.totalPps)
+				duration := time.Since(test.startTime).Seconds()
+				
+				if duration > 0 {
+					avgBps := int64(float64(totalBw*8) / duration)
+					
+					sendResult(serverURL, sessionId, TestResult{
+						Timestamp:  time.Now(),
+						Source:     "client",
+						Type:       "summary",
+						Protocol:   cmd.Protocol,
+						BitsPerSec: &avgBps,
+						Metadata: map[string]interface{}{
+							"totalBytes":   totalBw,
+							"totalPackets": totalPps,
+							"duration":     duration,
+						},
+						TestParams: testParams,
+					}, true)
+				}
+				deleteTest(test)
+			}
+			hubStatsCallback = nil
+			ui.printDbg("Test cleanup completed for session %s", sessionId)
+		}()
+		
+		// Don't call initClient() as it tries to create log files
+		// We're already running in hub mode with our own logging
+		
+		// Get server connection details
+		hostName, hostIP, port, err := getServerIPandPort(server)
+		if err != nil {
+			ui.printErr("Failed to parse server address: %v", err)
+			sendResult(serverURL, sessionId, TestResult{
+				Timestamp:  time.Now(),
+				Source:     "client",
+				Type:       "summary",
+				Protocol:   cmd.Protocol,
+				Metadata:   map[string]interface{}{"error": err.Error()},
+				TestParams: testParams,
+			}, true)
+			return
+		}
+		
+		ui.printMsg("Using destination: %s, ip: %s, port: %s", hostName, hostIP, port)
+		
+		// Create test
+		test, err = newTest(hostIP, testID, clientParam)
+		if err != nil {
+			ui.printErr("Failed to create test: %v", err)
+			sendResult(serverURL, sessionId, TestResult{
+				Timestamp:  time.Now(),
+				Source:     "client",
+				Type:       "summary",
+				Protocol:   cmd.Protocol,
+				TestParams: testParams,
+				Metadata:  map[string]interface{}{"error": err.Error()},
+			}, true)
+			return
+		}
+		
+		test.remoteAddr = server
+		test.remoteIP = hostIP
+		test.remotePort = port
+		
+		if testID.Protocol == ICMP {
+			test.dialAddr = hostIP
+		} else {
+			test.dialAddr = fmt.Sprintf("[%s]:%s", hostIP, port)
+		}
+		
+		// Set up stats callback to receive stats from ethr's native system
+		var intervalCounter int = 1
+		hubStatsCallback = func(remoteAddr string, proto EthrProtocol, bw, cps, pps, latency uint64, test *ethrTest) {
+			if !test.isActive {
+				return
+			}
+			
+			bps := int64(bw * 8) // Convert bytes/sec to bits/sec
+			bytesTransferred := int64(bw) // This is already per-second from printTestResult
+			packetsPerSec := int64(pps)
+			
+			result := TestResult{
+				Timestamp:        time.Now(),
+				Source:           "client",
+				Type:             "interval",
+				Protocol:         cmd.Protocol,
+				Interval:         &intervalCounter,
+				BitsPerSec:       &bps,
+				BytesTransferred: &bytesTransferred,
+				PacketsPerSec:    &packetsPerSec,
+			}
+			
+			// Include test parameters in the first interval result
+			if intervalCounter == 1 {
+				result.TestParams = testParams
+			}
+			
+			if testType == Latency && latency > 0 {
+				latencyMs := float64(latency) / 1000.0 // Convert microseconds to milliseconds
+				result.LatencyMs = &latencyMs
+			}
+			
+			sendResult(serverURL, sessionId, result, false)
+			intervalCounter++
+		}
+		
+		// Mark test as started (for defer cleanup and summary)
+		testStarted = true
+		
+		// Run the test (this blocks until test completes)
+		// Summary will be sent by defer when this completes
+		runTest(test)
+	}()
 }
 
 func sendResult(serverURL string, sessionId string, result TestResult, isFinal bool) {

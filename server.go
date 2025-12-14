@@ -435,7 +435,7 @@ func srvrHandleNewTcpConn(conn net.Conn) {
 		return
 	}
 	if isNew {
-		ui.emitTestHdr()
+		ui.emitTestHdr(test)
 	}
 
 	isCPSorPing := true
@@ -463,6 +463,14 @@ func srvrHandleNewTcpConn(conn net.Conn) {
 		ui.printDbg("Failed in handshake with the client. Error: %v", err)
 		return
 	}
+	
+	// Print client parameters received
+	if clientParam.NumThreads > 0 || clientParam.BufferSize > 0 || clientParam.Duration > 0 {
+		ui.printMsg("Client parameters - Threads: %d, BufferSize: %dKB, Duration: %ds, Reverse: %v, BwRate: %d",
+			clientParam.NumThreads, clientParam.BufferSize/1024, int(clientParam.Duration.Seconds()), 
+			clientParam.Reverse, clientParam.BwRate)
+	}
+	
 	isCPSorPing = false
 	if testID.Protocol == TCP {
 		if testID.Type == Bandwidth {
@@ -738,7 +746,7 @@ func srvrRunUDPPacketHandler(conn *net.UDPConn) {
 				}
 				if isNew {
 					ui.printDbg("Creating UDP test from server: %v, lastAccess: %v", server, time.Now())
-					ui.emitTestHdr()
+					ui.emitTestHdr(test)
 				}
 			}
 			if test != nil {
@@ -764,7 +772,7 @@ func srvrRunUDPPacketHandler(conn *net.UDPConn) {
 			}
 			if isNew {
 				ui.printDbg("Creating new UDP test for client IP: %s", server)
-				ui.emitTestHdr()
+				ui.emitTestHdr(test)
 			}
 		}
 		if test != nil {

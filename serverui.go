@@ -199,9 +199,10 @@ func (u *serverTui) emitTestResultEnd() {
 	emitAggregateResults()
 }
 
-func (u *serverTui) emitTestHdr() {
+func (u *serverTui) emitTestHdr(test *ethrTest) {
 	s := []string{"RemoteAddress", "Proto", "Bits/s", "Conn/s", "Pkts/s", "Latency"}
 	u.resultHdr = s
+	// TUI mode - parameters could be shown in a different section if needed
 }
 
 func (u *serverTui) emitLatencyHdr() {
@@ -352,9 +353,12 @@ func (u *serverCli) emitTestResultEnd() {
 	emitAggregateResults()
 }
 
-func (u *serverCli) emitTestHdr() {
+func (u *serverCli) emitTestHdr(test *ethrTest) {
 	s := []string{"RemoteAddress", "Proto", "Bits/s", "Conn/s", "Pkt/s", "Latency"}
-	fmt.Println("-----------------------------------------------------------")
+	
+	// Don't print detailed parameters for simple connection tracking
+	// (Parameters shown are empty for connection-based tests like CPS)
+	fmt.Println()
 	fmt.Printf("[%13s]  %5s  %7s  %7s  %7s  %8s\n", s[0], s[1], s[2], s[3], s[4], s[5])
 }
 
@@ -477,6 +481,12 @@ func getTestResults(s *ethrSession, proto EthrProtocol, seconds float64) []strin
 		if latTestOn {
 			latStr = durationToString(time.Duration(latency))
 		}
+		
+		// Call hub callback if registered (for hub integration mode)
+		if hubStatsCallback != nil {
+			hubStatsCallback(s.remoteIP, proto, bw, cps, pps, latency, test)
+		}
+		
 		str := []string{s.remoteIP, protoToString(proto),
 			bwStr, cpsStr, ppsStr, latStr}
 		return str

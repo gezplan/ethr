@@ -158,6 +158,9 @@ func stopStatsTimer() {
 
 var lastStatsTime time.Time = time.Now()
 
+// Callback for hub mode to receive stats
+var hubStatsCallback func(remoteAddr string, proto EthrProtocol, bw, cps, pps, latency uint64, test *ethrTest)
+
 func timeToNextTick() time.Duration {
 	nextTick := lastStatsTime.Add(time.Second)
 	return time.Until(nextTick)

@@ -206,6 +206,7 @@ func main() {
 		initClient("")
 		hubConfig := HubConfig{
 			ServerURL: *hubURL,
+			Title:     *title,
 		}
 		runHubAgent(hubConfig)
 	} else {
