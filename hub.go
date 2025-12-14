@@ -952,6 +952,8 @@ func executeCommand(serverURL string, sessionId string, cmd TestCommand) {
 		executeServerMode(serverURL, sessionId, cmd)
 	} else if cmd.Mode == "client" {
 		executeClientMode(serverURL, sessionId, cmd)
+	} else if cmd.Mode == "external" {
+		executeExternalMode(serverURL, sessionId, cmd)
 	} else {
 		updateSessionStatus(serverURL, sessionId, "Failed", "Invalid mode: "+cmd.Mode)
 	}
@@ -975,9 +977,75 @@ func executeServerMode(serverURL string, sessionId string, cmd TestCommand) {
 	}, false)
 	
 	// Set up callback to receive stats from ethr's stats system
-	interval := 1
 	var testParamsSent = make(map[string]bool) // Track if we've sent params for this remote addr
+	var intervalCounters = make(map[string]int) // Track interval counter per remote addr
+	var lastSessionID = make(map[string]string) // Track session ID for deterministic new test detection
+	
 	hubStatsCallback = func(remoteAddr string, proto EthrProtocol, bw, cps, pps, latency uint64, test *ethrTest) {
+		newTestDetected := false
+		
+		if test != nil {
+			currentSessionID := test.sessionID
+			hasControlChannel := test.ctrlConn != nil || currentSessionID != ""
+			
+			// DETERMINISTIC: Use sessionID if control channel exists
+			if hasControlChannel {
+				prevSessionID := lastSessionID[remoteAddr]
+				if prevSessionID != "" && prevSessionID != currentSessionID {
+					newTestDetected = true
+					ui.printDbg("New test session detected for %s (sessionID changed: %s -> %s)", 
+						remoteAddr, prevSessionID, currentSessionID)
+				}
+				lastSessionID[remoteAddr] = currentSessionID
+			} else {
+				// HEURISTICS: Fall back to multiple detection methods for -ncc mode
+				// 1. Test type or protocol changed (different test started)
+				// 2. Test start time changed (same test type restarted)
+				
+				currentStartTime := test.startTime
+				prevSessionID := lastSessionID[remoteAddr]
+				
+				// Check if test pointer changed
+				if prevSessionID != "" && lastSessionID[remoteAddr] != "" {
+					// We've seen this client before (in -ncc mode)
+					
+					// Check if test type or protocol changed
+					if test.testID.Type != 0 { // Valid test type
+						key := fmt.Sprintf("%s_%d_%d", remoteAddr, test.testID.Type, test.testID.Protocol)
+						prevKey := lastSessionID[remoteAddr]
+						if prevKey != "" && prevKey != key {
+							newTestDetected = true
+							ui.printDbg("New test session detected for %s (test type/protocol changed in -ncc mode)", remoteAddr)
+						}
+						lastSessionID[remoteAddr] = key
+					}
+					
+					// Check if test start time changed (test restarted with same type)
+					if !currentStartTime.IsZero() {
+						startTimeKey := fmt.Sprintf("start_%s_%d", remoteAddr, currentStartTime.Unix())
+						if lastSessionID[remoteAddr] != startTimeKey {
+							newTestDetected = true
+							ui.printDbg("New test session detected for %s (start time changed in -ncc mode)", remoteAddr)
+						}
+						lastSessionID[remoteAddr] = startTimeKey
+					}
+				} else {
+					// First time seeing this client in -ncc mode
+					lastSessionID[remoteAddr] = fmt.Sprintf("init_%s", remoteAddr)
+				}
+			}
+			
+			// Reset counters if new test detected
+			if newTestDetected {
+				intervalCounters[remoteAddr] = 0
+				testParamsSent[remoteAddr] = false
+			}
+		}
+		
+		// Get or initialize interval counter for this client
+		intervalCounters[remoteAddr]++
+		interval := intervalCounters[remoteAddr]
+		
 		// Convert to the format expected by the hub
 		bps := int64(bw * 8) // Convert bytes/sec to bits/sec
 		bytes := int64(bw)   // Bytes transferred in this second
@@ -1047,7 +1115,6 @@ func executeServerMode(serverURL string, sessionId string, cmd TestCommand) {
 		}
 		
 		sendResult(serverURL, sessionId, result, false)
-		interval++
 	}
 	
 	// Start the actual ethr server
@@ -1299,6 +1366,158 @@ func executeClientMode(serverURL string, sessionId string, cmd TestCommand) {
 		// Run the test (this blocks until test completes)
 		// Summary will be sent by defer when this completes
 		runTest(test)
+	}()
+}
+
+func executeExternalMode(serverURL string, sessionId string, cmd TestCommand) {
+	// External mode: Run ping, traceroute, or mytraceroute against any destination
+	ui.printMsg("Starting external test (%s) to %s:%d", cmd.TestType, cmd.Destination, cmd.Port)
+	
+	// Set global flag for external mode
+	gIsExternalClient = true
+	
+	// Build test ID from command
+	var protocol EthrProtocol
+	switch cmd.Protocol {
+	case "tcp":
+		protocol = TCP
+	case "udp":
+		protocol = UDP
+	case "icmp":
+		protocol = ICMP
+	default:
+		protocol = TCP
+	}
+	
+	var testType EthrTestType
+	switch cmd.TestType {
+	case "pi":
+		testType = Ping
+	case "tr":
+		testType = TraceRoute
+	case "mtr":
+		testType = MyTraceRoute
+	default:
+		ui.printErr("Invalid test type for external mode: %s (only pi, tr, mtr allowed)", cmd.TestType)
+		updateSessionStatus(serverURL, sessionId, "Failed", "Invalid test type for external mode")
+		return
+	}
+	
+	testID := EthrTestID{
+		Type:     testType,
+		Protocol: protocol,
+	}
+	
+	// Build client parameters
+	clientParam := EthrClientParam{
+		NumThreads: 1, // External tests typically use 1 thread
+		Duration:   time.Duration(cmd.DurationSeconds) * time.Second,
+	}
+	
+	// Build test parameters for display
+	testParams := buildTestParams(cmd, protocol, testType)
+	
+	// Create server address
+	server := fmt.Sprintf("%s:%d", cmd.Destination, cmd.Port)
+	
+	// Run external test in a goroutine
+	go func() {
+		var test *ethrTest
+		defer func() {
+			if test != nil {
+				// Send summary for external tests (ping results, traceroute hops, etc.)
+				sendResult(serverURL, sessionId, TestResult{
+					Timestamp:  time.Now(),
+					Source:     "external",
+					Type:       "summary",
+					Protocol:   cmd.Protocol,
+					TestParams: testParams,
+					Metadata: map[string]interface{}{
+						"testType":    cmd.TestType,
+						"destination": cmd.Destination,
+						"port":        cmd.Port,
+					},
+				}, true)
+				deleteTest(test)
+			}
+		}()
+		
+		// Get server connection details
+		hostName, hostIP, port, err := getServerIPandPort(server)
+		if err != nil {
+			ui.printErr("Failed to parse server address: %v", err)
+			sendResult(serverURL, sessionId, TestResult{
+				Timestamp:  time.Now(),
+				Source:     "external",
+				Type:       "summary",
+				Protocol:   cmd.Protocol,
+				TestParams: testParams,
+				Metadata:   map[string]interface{}{"error": err.Error()},
+			}, true)
+			return
+		}
+		
+		ui.printMsg("Using destination: %s, ip: %s, port: %s", hostName, hostIP, port)
+		
+		// Create test
+		test, err = newTest(hostIP, testID, clientParam)
+		if err != nil {
+			ui.printErr("Failed to create test: %v", err)
+			sendResult(serverURL, sessionId, TestResult{
+				Timestamp:  time.Now(),
+				Source:     "external",
+				Type:       "summary",
+				Protocol:   cmd.Protocol,
+				TestParams: testParams,
+				Metadata:   map[string]interface{}{"error": err.Error()},
+			}, true)
+			return
+		}
+		
+		test.remoteAddr = server
+		test.remoteIP = hostIP
+		test.remotePort = port
+		
+		if testID.Protocol == ICMP {
+			test.dialAddr = hostIP
+		} else {
+			test.dialAddr = fmt.Sprintf("[%s]:%s", hostIP, port)
+		}
+		
+		// Set up stats callback for external tests (mainly for ping latency)
+		var intervalCounter int = 1
+		hubStatsCallback = func(remoteAddr string, proto EthrProtocol, bw, cps, pps, latency uint64, test *ethrTest) {
+			if !test.isActive {
+				return
+			}
+			
+			result := TestResult{
+				Timestamp: time.Now(),
+				Source:    "external",
+				Type:      "interval",
+				Protocol:  cmd.Protocol,
+				Interval:  &intervalCounter,
+			}
+			
+			// Include test parameters in the first interval result
+			if intervalCounter == 1 {
+				result.TestParams = testParams
+			}
+			
+			// For ping tests, report latency
+			if testType == Ping && latency > 0 {
+				latencyMs := float64(latency) / 1000.0 // Convert microseconds to milliseconds
+				result.LatencyMs = &latencyMs
+			}
+			
+			sendResult(serverURL, sessionId, result, false)
+			intervalCounter++
+		}
+		
+		// Run the test (this blocks until test completes)
+		// Summary will be sent by defer when this completes
+		runTest(test)
+		hubStatsCallback = nil
 	}()
 }
 

@@ -421,18 +421,19 @@ func getTestResults(s *ethrSession, proto EthrProtocol, seconds float64) []strin
 		// The startTime is set during sync handshake to indicate when data transfer begins
 		if !test.startTime.IsZero() {
 			// This interval covers [lastStatsTime - seconds, lastStatsTime]
-			// For synchronized tests, startTime should be at the interval boundary.
-			// Use a small tolerance (50ms) to account for timing jitter.
+			// intervalStart is when this measurement period began
 			intervalStart := lastStatsTime.Add(-time.Duration(seconds * float64(time.Second)))
-			tolerance := 50 * time.Millisecond
 			
+			// Skip if the test started after this interval began (test wasn't running for full interval)
+			// Use a small tolerance to handle the case where test starts exactly at interval boundary
+			tolerance := 10 * time.Millisecond
 			if test.startTime.After(intervalStart.Add(tolerance)) {
-				// Test started well after this interval began - skip
+				// Test started during this interval - skip to avoid printing partial/zero data
 				atomic.SwapUint64(&test.testResult.cps, 0)
 				atomic.SwapUint64(&test.testResult.pps, 0)
 				return []string{}
 			}
-			// Test started at or before this interval - report it
+			// Test was running for the full interval - clear startTime and report
 			test.startTime = time.Time{}
 		}
 
@@ -466,6 +467,13 @@ func getTestResults(s *ethrSession, proto EthrProtocol, seconds float64) []strin
 		// This helps identify issues with connection rate drops
 		// If test is dormant, never print (regardless of current stats)
 		if test.isDormant {
+			return []string{}
+		}
+		
+		// Skip printing if we have zero data across all metrics
+		// This happens when a new test starts but hasn't collected any data yet
+		// Exception: Print if we have latency data (for latency-only tests)
+		if bw == 0 && cps == 0 && pps == 0 && !latTestOn {
 			return []string{}
 		}
 	}

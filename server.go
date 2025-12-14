@@ -265,6 +265,14 @@ func trySyncStartWithClient(test *ethrTest, conn net.Conn) (isControlChannel boo
 			// This allows data connections to accumulate stats per session
 			server, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
 			registerSessionStats(sessionID, server, ethrMsg.CtrlStart.UDPPorts)
+			
+			// Reset startTime if this is a new session (different sessionID)
+			// This ensures each new test run behaves like a fresh start
+			// For multi-threaded tests with same sessionID, we keep the existing startTime
+			if test.sessionID != sessionID {
+				test.startTime = time.Time{}
+				test.sessionID = sessionID
+			}
 		}
 		test.ctrlConn = conn
 		
@@ -293,6 +301,9 @@ func trySyncStartWithClient(test *ethrTest, conn net.Conn) (isControlChannel boo
 	if ethrMsg.Type == EthrSyncStart {
 		// In-band sync mode (-ncc on client): sync happens on data connection
 		isControlChannel = false
+		// For -ncc mode, always reset startTime since each test is independent
+		// (no control channel to track sessionID across connections)
+		test.startTime = time.Time{}
 		err = doTimeSync(test, conn)
 		return
 	}
@@ -367,8 +378,10 @@ func handleControlChannel(test *ethrTest, sessionID string, conn net.Conn) {
 	for {
 		ethrMsg := recvSessionMsg(conn)
 		if ethrMsg.Type == EthrInv {
-			// Connection closed or error
-			ui.printDbg("Control channel: received invalid/closed connection")
+			// Connection closed or error - client disconnected unexpectedly
+			ui.printDbg("Control channel: received invalid/closed connection, clearing control channel and marking dormant")
+			test.isDormant = true
+			test.ctrlConn = nil  // Clear control connection so cleanup goroutine can remove this test
 			return
 		}
 
@@ -472,10 +485,6 @@ func srvrHandleNewTcpConn(conn net.Conn) {
 		return
 	}
 
-	// Always increment CPS counters first (both per-interval and total)
-	atomic.AddUint64(&test.testResult.cps, 1)
-	atomic.AddUint64(&test.testResult.totalCps, 1)
-	
 	// Update last access time for proper cleanup
 	test.lastAccess = time.Now()
 
@@ -487,13 +496,16 @@ func srvrHandleNewTcpConn(conn net.Conn) {
 	testID, clientParam, sessionID, err := handshakeWithClient(test, conn)
 	if err != nil {
 		// If handshake fails, this is a pure CPS test connection (no control channel - old style -ncc)
+		// Increment CPS counters for this pure CPS connection
+		atomic.AddUint64(&test.testResult.cps, 1)
+		atomic.AddUint64(&test.testResult.totalCps, 1)
 		// Activate the test if it's the first connection
 		if isNew {
 			test.isDormant = false
 		}
-		// Just count it (already done above) and return immediately without sleeping
+		// Just count it and return immediately without sleeping
 		// The test object remains alive to accumulate CPS stats
-		// Test cleanup happens via the idle test cleanup mechanism in stats.go
+		// Test cleanup happens via the idle test cleanup mechanism
 		return
 	}
 	
