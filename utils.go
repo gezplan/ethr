@@ -67,6 +67,11 @@ func unitToNumber(s string) uint64 {
 	s = strings.TrimSpace(s)
 	s = strings.ToUpper(s)
 
+	// Remove "BPS" suffix if present (e.g., "1GBPS" -> "1G")
+	s = strings.TrimSuffix(s, "BPS")
+	// Also handle "PS" suffix (e.g., if someone enters "1Gps")
+	s = strings.TrimSuffix(s, "PS")
+
 	i := strings.IndexFunc(s, unicode.IsLetter)
 
 	if i == -1 {
@@ -84,15 +89,15 @@ func unitToNumber(s string) uint64 {
 	}
 
 	switch multiple {
-	case "T", "TB", "TIB":
+	case "T", "TB", "TIB", "TBIT", "TBITS":
 		return uint64(bytes * TERA)
-	case "G", "GB", "GIB":
+	case "G", "GB", "GIB", "GBIT", "GBITS":
 		return uint64(bytes * GIGA)
-	case "M", "MB", "MIB":
+	case "M", "MB", "MIB", "MBIT", "MBITS":
 		return uint64(bytes * MEGA)
-	case "K", "KB", "KIB":
+	case "K", "KB", "KIB", "KBIT", "KBITS":
 		return uint64(bytes * KILO)
-	case "B":
+	case "B", "BIT", "BITS":
 		return uint64(bytes)
 	default:
 		return 0

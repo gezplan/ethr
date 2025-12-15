@@ -1356,7 +1356,12 @@ func executeClientMode(serverURL string, sessionId string, cmd TestCommand, canc
 	bwRate := uint64(0) // Default unlimited
 	if cmd.Bandwidth != "" {
 		bwRate = unitToNumber(cmd.Bandwidth)
-		bwRate /= 8 // Convert bits/s to bytes/s
+		if bwRate > 0 {
+			bwRate /= 8 // Convert bits/s to bytes/s
+			ui.printMsg("Bandwidth limit: %s (%d bytes/s)", cmd.Bandwidth, bwRate)
+		} else {
+			ui.printMsg("Warning: Invalid bandwidth value '%s', using unlimited", cmd.Bandwidth)
+		}
 	}
 	
 	clientParam := EthrClientParam{
