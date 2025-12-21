@@ -850,7 +850,7 @@ func srvrRunUDPServer() error {
 			var opErr error
 			err := c.Control(func(fd uintptr) {
 				// Set SO_REUSEADDR to allow binding to a port in TIME_WAIT state
-				opErr = syscall.SetsockoptInt(syscall.Handle(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
+				opErr = setSockOptReuseAddr(fd)
 			})
 			if err != nil {
 				return err

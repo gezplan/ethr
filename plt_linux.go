@@ -201,3 +201,9 @@ func SetTClass(fd uintptr, tos int) {
 func WinIcmpProbe(destIP string, ttl int, timeout uint32) (peerAddr string, rtt uint32, isLast bool, err error) {
 	return "", 0, false, os.ErrNotExist
 }
+
+// setSockOptReuseAddr sets SO_REUSEADDR on a file descriptor
+// On Unix systems (Linux), fd is an int
+func setSockOptReuseAddr(fd uintptr) error {
+	return syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
+}

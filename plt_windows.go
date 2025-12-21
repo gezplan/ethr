@@ -449,3 +449,9 @@ func WinIcmpProbe(destIP string, ttl int, timeout uint32) (peerAddr string, rtt 
 		return "", 0, false, nil
 	}
 }
+
+// setSockOptReuseAddr sets SO_REUSEADDR on a file descriptor
+// On Windows, fd must be a syscall.Handle
+func setSockOptReuseAddr(fd uintptr) error {
+	return syscall.SetsockoptInt(syscall.Handle(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
+}

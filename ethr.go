@@ -32,8 +32,9 @@ func main() {
 		gVersion = "UNKNOWN"
 	}
 
-	fmt.Println("\nEthr: Comprehensive Network Performance Measurement Tool (Version: " + gVersion + ")")
-	fmt.Println("Maintainer: Pankaj Garg (ipankajg @ LinkedIn | GitHub | Gmail | Twitter)")
+	fmt.Println("\nEthr: Comprehensive Network Performance Measurement Tool")
+	fmt.Println("Built by EthrHub team | Based on original Ethr by Microsoft")
+	fmt.Println("Support & Issues: https://github.com/ethrhub/ethr/issues")
 	fmt.Println("")
 
 	//
