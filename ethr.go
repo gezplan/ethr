@@ -631,7 +631,7 @@ func printTitleUsage() {
 	fmt.Println("║  -T <string>                                                      ║")
 	fmt.Println("║                                                                   ║")
 	fmt.Println("║  This title appears as a BADGE next to your hostname in the      ║")
-	fmt.Println("║  YugaPerf dashboard UI. Use it to identify and differentiate     ║")
+	fmt.Println("║  EthrHub dashboard UI. Use it to identify and differentiate      ║")
 	fmt.Println("║  between multiple agent instances running on different systems.  ║")
 	fmt.Println("║                                                                   ║")
 	fmt.Println("║  Examples:                                                        ║")

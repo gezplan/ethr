@@ -67,7 +67,7 @@ Before creating your first release, verify:
 
 ### 1. Push the workflow files:
 ```bash
-cd /Users/pg/Source/yperf/ethr
+cd /Users/pg/Source/ethrhub/ethr
 git add .github/
 git commit -m "Add GitHub Actions workflows"
 git push origin master

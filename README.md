@@ -289,7 +289,7 @@ In this mode, Ethr client can only talk to an Ethr server.
 		║  IMPORTANT: Agent Display Title (UI Identifier)          ║
 		╠═══════════════════════════════════════════════════════════╣
 		║  This title appears as a BADGE next to the hostname in   ║
-		║  the YugaPerf dashboard UI. Use it to identify and       ║
+		║  the EthrHub dashboard UI. Use it to identify and        ║
 		║  differentiate between multiple agent instances.         ║
 		║                                                           ║
 		║  Example: -T "prod-west" or -T "test-env-1"             ║
