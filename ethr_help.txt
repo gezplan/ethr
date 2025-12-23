@@ -1,0 +1,217 @@
+
+Ethr: Comprehensive Network Performance Measurement Tool
+Built by EthrHub team | Based on original Ethr by Microsoft
+Support & Issues: https://github.com/ethrhub/ethr/issues
+
+Ethr supports four modes. Usage of each mode is described below:
+
+Common Parameters
+================================================================================
+	-h 
+		Help
+	-no 
+		Disable logging to file. Logging to file is enabled by default.
+	-o <filename>
+		Name of log file. By default, following file names are used:
+		Server mode: 'ethrs.log'
+		Client mode: 'ethrc.log'
+		Hub mode: 'ethrh.log'
+	-debug 
+		Enable debug information in logging output.
+	-4 
+		Use only IP v4 version
+	-6 
+		Use only IP v6 version
+	-dp <1|2>
+		Decimal precision for bandwidth display (default: 1).
+		Use 2 for higher precision comparison between client and server.
+
+Mode: Server
+================================================================================
+In this mode, Ethr runs as a server, allowing multiple clients to run
+performance tests against it.
+	-s 
+		Run in server mode.
+	-ip <string>
+		Bind to specified local IP address for TCP & UDP tests.
+		This must be a valid IPv4 or IPv6 address.
+		Default: <empty> - Any IP
+	-port <number>
+		Use specified port number for TCP & UDP tests.
+		Default: 8888
+	-ui 
+		Show output in text UI.
+	-1 
+		Handle one client connection then exit (like iPerf3).
+		Provides precise synchronization for accurate client/server bandwidth matching.
+
+Mode: Client
+================================================================================
+In this mode, Ethr client can only talk to an Ethr server.
+	-c <server>
+		Run in client mode and connect to <server>.
+		Server is specified using name, FQDN or IP address.
+	-b <rate>
+		Transmit only Bits per second (format: <num>[K | M | G])
+		Only valid for Bandwidth tests. Default: 0 - Unlimited
+		Examples: 100 (100bits/s), 1M (1Mbits/s).
+	-cport <number>
+		Use specified local port number in client for TCP & UDP tests.
+		Default: 0 - Ephemeral Port
+	-d <duration>
+		Duration for the test (format: <num>[ms | s | m | h]
+		0: Run forever
+		Default: 10s
+	-g <gap>
+		Time interval between successive measurements (format: <num>[ms | s | m | h]
+		Only valid for latency, ping and traceRoute tests.
+		0: No gap
+		Default: 1s
+	-i <iterations>
+		Number of round trip iterations for each latency measurement.
+		Only valid for latency testing.
+		Default: 1000
+	-ip <string>
+		Bind to specified local IP address for TCP & UDP tests.
+		This must be a valid IPv4 or IPv6 address.
+		Default: <empty> - Any IP
+	-l <length>
+		Length of buffer (in Bytes) to use (format: <num>[KB | MB | GB])
+		Only valid for Bandwidth tests. Max 1GB.
+		Default: 16KB
+	-n <number>
+		Number of Parallel Sessions (and Threads).
+		0: Equal to number of CPUs
+		Default: 1
+	-p <protocol>
+		Protocol ("tcp", "udp", "http", or "https")
+		tcp: Bandwidth, Connections/s, Latency
+		udp: Bandwidth, Packets/s, Latency
+		http/https: Bandwidth, Connections/s (client mode only)
+		Default: tcp
+	-port <number>
+		Use specified port number for TCP & UDP tests.
+		Default: 8888
+	-r 
+		For Bandwidth tests, send data from server to client.
+	-t <test>
+		Test to run ("b", "c", "p", "l", "pi", "tr", or "mtr")
+		b: Bandwidth (TCP, UDP)
+		c: Connections/s (TCP)
+		p: Packets/s (UDP)
+		l: Latency, Loss & Jitter (TCP, UDP)
+		pi: Ping Loss & Latency (TCP)
+		tr: TraceRoute (TCP)
+		mtr: MyTraceRoute with Loss & Latency (TCP)
+		Default: b - Bandwidth measurement.
+	-tos 
+		Specifies 8-bit value to use in IPv4 TOS field or IPv6 Traffic Class field.
+	-w <number>
+		Use specified number of iterations for warmup.
+		Default: 1
+╔═══════════════════════════════════════════════════════════════════╗
+║  IMPORTANT: Agent Display Title (UI Identifier)                  ║
+╠═══════════════════════════════════════════════════════════════════╣
+║  -T <string>                                                      ║
+║                                                                   ║
+║  This title appears as a BADGE next to your hostname in the      ║
+║  EthrHub dashboard UI. Use it to identify and differentiate      ║
+║  between multiple agent instances running on different systems.  ║
+║                                                                   ║
+║  Examples:                                                        ║
+║    ethr -hub http://localhost:5284 -T "production-west"        ║
+║    ethr -hub http://localhost:5284 -T "test-env-1"            ║
+║    ethr -hub http://localhost:5284 -T "staging-server"        ║
+║                                                                   ║
+║  The title is also used in log files for logging results.        ║
+╚═══════════════════════════════════════════════════════════════════╝
+
+	-T <string>
+		Use the given title in log files for logging results.
+		Default: <empty>
+	-ncc 
+		No Control Channel. Disable the separate control channel and use
+		in-band synchronization on data connections instead.
+		Use this option when the server is behind a load balancer, as the
+		control channel and data connections may land on different servers.
+		Default: Control channel is enabled for richer output (iPerf-style).
+
+Mode: External
+================================================================================
+In this mode, Ethr talks to a non-Ethr server. This mode supports only a
+few types of measurements, such as Ping, Connections/s and TraceRoute.
+	-x <destination>
+		Run in external client mode and connect to <destination>.
+		<destination> is specified in URL or Host:Port format.
+		For URL, if port is not specified, it is assumed to be 80 for http and 443 for https.
+		Example: For TCP - www.microsoft.com:443 or 10.1.0.4:22 or https://www.github.com
+		         For ICMP - www.microsoft.com or 10.1.0.4
+	-cport <number>
+		Use specified local port number in client for TCP & UDP tests.
+		Default: 0 - Ephemeral Port
+	-d <duration>
+		Duration for the test (format: <num>[ms | s | m | h]
+		0: Run forever
+		Default: 10s
+	-g <gap>
+		Time interval between successive measurements (format: <num>[ms | s | m | h]
+		Only valid for latency, ping and traceRoute tests.
+		0: No gap
+		Default: 1s
+	-ip <string>
+		Bind to specified local IP address for TCP & UDP tests.
+		This must be a valid IPv4 or IPv6 address.
+		Default: <empty> - Any IP
+	-n <number>
+		Number of Parallel Sessions (and Threads).
+		0: Equal to number of CPUs
+		Default: 1
+	-p <protocol>
+		Protocol ("tcp" or "icmp")
+		tcp: Connections/s, Ping, TraceRoute
+		icmp: Ping, TraceRoute, MyTraceRoute (requires admin/root)
+		Default: tcp
+	-t <test>
+		Test to run ("c", "pi", "tr", or "mtr")
+		c: Connections/s (TCP)
+		pi: Ping Loss & Latency (ICMP, TCP)
+		tr: TraceRoute (ICMP, TCP)
+		mtr: MyTraceRoute with Loss & Latency (ICMP, TCP)
+		Default: pi - Ping Loss & Latency.
+	-tos 
+		Specifies 8-bit value to use in IPv4 TOS field or IPv6 Traffic Class field.
+	-w <number>
+		Use specified number of iterations for warmup.
+		Default: 1
+╔═══════════════════════════════════════════════════════════════════╗
+║  IMPORTANT: Agent Display Title (UI Identifier)                  ║
+╠═══════════════════════════════════════════════════════════════════╣
+║  -T <string>                                                      ║
+║                                                                   ║
+║  This title appears as a BADGE next to your hostname in the      ║
+║  EthrHub dashboard UI. Use it to identify and differentiate      ║
+║  between multiple agent instances running on different systems.  ║
+║                                                                   ║
+║  Examples:                                                        ║
+║    ethr -hub http://localhost:5284 -T "production-west"        ║
+║    ethr -hub http://localhost:5284 -T "test-env-1"            ║
+║    ethr -hub http://localhost:5284 -T "staging-server"        ║
+║                                                                   ║
+║  The title is also used in log files for logging results.        ║
+╚═══════════════════════════════════════════════════════════════════╝
+
+	-T <string>
+		Use the given title in log files for logging results.
+		Default: <empty>
+
+Mode: Hub
+================================================================================
+In this mode, Ethr connects to a hub (command center) via device authentication
+and awaits test commands. Tests are executed on demand and detailed results
+(including per-second statistics) are sent back to the hub for storage and
+analysis. This enables centralized control and monitoring of performance tests.
+	-hub <hub-url>
+		Run in hub mode and connect to <hub-url>.
+		Hub is specified as a URL (e.g., http://hub.example.com:5284).
+		Uses OAuth 2.0 device authentication flow for secure access.
+		Example: -hub "http://localhost:5284"

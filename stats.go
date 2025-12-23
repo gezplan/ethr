@@ -159,7 +159,21 @@ func stopStatsTimer() {
 var lastStatsTime time.Time = time.Now()
 
 // Callback for hub mode to receive stats
-var hubStatsCallback func(remoteAddr string, proto EthrProtocol, bw, cps, pps, latency uint64, test *ethrTest)
+// Extended signature to support all test types and detailed metrics
+var hubStatsCallback func(remoteAddr string, proto EthrProtocol, testType EthrTestType, 
+	bw, cps, pps uint64, latencyStats *LatencyStats, hops []ethrHopData, test *ethrTest)
+
+type LatencyStats struct {
+	Avg    time.Duration
+	Min    time.Duration
+	Max    time.Duration
+	P50    time.Duration
+	P90    time.Duration
+	P95    time.Duration
+	P99    time.Duration
+	P999   time.Duration
+	P9999  time.Duration
+}
 
 func timeToNextTick() time.Duration {
 	nextTick := lastStatsTime.Add(time.Second)

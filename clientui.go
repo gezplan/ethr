@@ -68,6 +68,48 @@ func (u *clientUI) emitLatencyResults(remote, proto string, avg, min, max, p50, 
 		durationToString(p95), durationToString(p99),
 		durationToString(p999), durationToString(p9999),
 		durationToString(max))
+	
+	// Send latency stats to hub if callback is set
+	if hubStatsCallback != nil {
+		latencyStats := &LatencyStats{
+			Avg:   avg,
+			Min:   min,
+			Max:   max,
+			P50:   p50,
+			P90:   p90,
+			P95:   p95,
+			P99:   p99,
+			P999:  p999,
+			P9999: p9999,
+		}
+		// Find the test for this remote - we'll use the first one found
+		gSessionLock.RLock()
+		var targetTest *ethrTest
+		for _, session := range gSessions {
+			if session.remoteIP == remote {
+				for _, test := range session.tests {
+					if test.testID.Type == Latency {
+						targetTest = test
+						break
+					}
+				}
+				if targetTest != nil {
+					break
+				}
+			}
+		}
+		gSessionLock.RUnlock()
+		
+		if targetTest != nil {
+			protoEnum := TCP
+			if proto == "udp" {
+				protoEnum = UDP
+			} else if proto == "icmp" {
+				protoEnum = ICMP
+			}
+			hubStatsCallback(remote, protoEnum, Latency, 0, 0, 0, latencyStats, nil, targetTest)
+		}
+	}
 }
 
 func (u *clientUI) emitTestResultEnd() {
@@ -149,7 +191,7 @@ func printTestResult(test *ethrTest, seconds float64) {
 		
 		// Send stats to hub if callback is set
 		if hubStatsCallback != nil {
-			hubStatsCallback(test.session.remoteIP, test.testID.Protocol, cbw, 0, cpps, 0, test)
+			hubStatsCallback(test.session.remoteIP, test.testID.Protocol, test.testID.Type, cbw, 0, cpps, nil, nil, test)
 		}
 	} else if test.testID.Type == Cps {
 		if gInterval == 0 {
@@ -165,7 +207,7 @@ func printTestResult(test *ethrTest, seconds float64) {
 		
 		// Send stats to hub if callback is set
 		if hubStatsCallback != nil {
-			hubStatsCallback(test.session.remoteIP, test.testID.Protocol, 0, cps, 0, 0, test)
+			hubStatsCallback(test.session.remoteIP, test.testID.Protocol, test.testID.Type, 0, cps, 0, nil, nil, test)
 		}
 	} else if test.testID.Type == Pps {
 		if gInterval == 0 {
@@ -182,7 +224,7 @@ func printTestResult(test *ethrTest, seconds float64) {
 		
 		// Send stats to hub if callback is set
 		if hubStatsCallback != nil {
-			hubStatsCallback(test.session.remoteIP, test.testID.Protocol, bw, 0, pps, 0, test)
+			hubStatsCallback(test.session.remoteIP, test.testID.Protocol, test.testID.Type, bw, 0, pps, nil, nil, test)
 		}
 	} else if test.testID.Type == MyTraceRoute {
 		if gCurHops > 0 {
@@ -203,6 +245,14 @@ func printTestResult(test *ethrTest, seconds float64) {
 			} else {
 				ui.printMsg("%2d.|--%-40s   %5s   %5s   %9s   %9s   %9s   %9s", i+1, "???", "-", "-", "-", "-", "-", "-")
 			}
+		}
+		
+		// Send MyTraceRoute stats to hub if callback is set
+		if hubStatsCallback != nil && gCurHops > 0 {
+			// Copy hop data to send to hub
+			hopsCopy := make([]ethrHopData, gCurHops)
+			copy(hopsCopy, gHop[:gCurHops])
+			hubStatsCallback(test.session.remoteIP, test.testID.Protocol, test.testID.Type, 0, 0, 0, nil, hopsCopy, test)
 		}
 	}
 	gInterval++

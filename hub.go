@@ -79,31 +79,129 @@ type TestCommand struct {
 	Title            string            `json:"title,omitempty"`
 	Destination      string            `json:"destination,omitempty"`
 	Port             int               `json:"port"`
-	DurationSeconds  int               `json:"durationSeconds"`
+	Duration         string            `json:"duration"`                   // Duration string with format: <num>[ms|s|m|h]
 	Threads          int               `json:"threads"`
 	BufferSize       string            `json:"bufferSize,omitempty"`
 	Bandwidth        string            `json:"bandwidth,omitempty"`
 	Reverse          bool              `json:"reverse"`
 	Tos              int               `json:"tos"`
+	Gap              string            `json:"gap,omitempty"`              // Time interval between measurements (e.g., "1s", "100ms")
+	Iterations       int               `json:"iterations,omitempty"`       // Number of iterations for latency tests
+	Warmup           int               `json:"warmup,omitempty"`           // Number of warmup iterations
+	ClientPort       int               `json:"clientPort,omitempty"`       // Local client port (0 = ephemeral)
+	BindIp           string            `json:"bindIp,omitempty"`           // Bind to specific local IP
+	NoControlChannel bool              `json:"noControlChannel,omitempty"` // Disable control channel
 	AdditionalParams map[string]string `json:"additionalParams,omitempty"`
+}
+
+// parseDuration parses a duration string in ethr format: <num>[ms|s|m|h]
+// Returns seconds. Defaults to seconds if no unit specified.
+func parseDurationToSeconds(durationStr string) int {
+	if durationStr == "" {
+		return 10 // default 10 seconds
+	}
+	
+	durationStr = strings.TrimSpace(durationStr)
+	if durationStr == "0" {
+		return 0 // run forever
+	}
+	
+	// Try to parse with time.ParseDuration (supports h, m, s, ms, us, ns)
+	if d, err := time.ParseDuration(durationStr); err == nil {
+		return int(d.Seconds())
+	}
+	
+	// Fall back: try parsing as just a number (assume seconds)
+	var num int
+	if _, err := fmt.Sscanf(durationStr, "%d", &num); err == nil {
+		return num
+	}
+	
+	return 10 // default
+}
+
+// parseDurationToTime parses a duration string and returns a time.Duration
+func parseDurationToTime(durationStr string) time.Duration {
+	if durationStr == "" {
+		return 10 * time.Second // default
+	}
+	
+	durationStr = strings.TrimSpace(durationStr)
+	if durationStr == "0" {
+		return 0 // run forever
+	}
+	
+	// Try to parse with time.ParseDuration
+	if d, err := time.ParseDuration(durationStr); err == nil {
+		return d
+	}
+	
+	// Fall back: try parsing as just a number (assume seconds)
+	var num int
+	if _, err := fmt.Sscanf(durationStr, "%d", &num); err == nil {
+		return time.Duration(num) * time.Second
+	}
+	
+	return 10 * time.Second // default
 }
 
 type TestResult struct {
 	Timestamp         time.Time              `json:"timestamp"`
-	Source            string                 `json:"source"`
-	Type              string                 `json:"type"`
+	Source            string                 `json:"source"`              // "client", "server", or "external"
+	Type              string                 `json:"type"`                // "interval", "summary", "error", "latency", "ping", "traceroute", "mytraceroute", "connection"
 	Protocol          string                 `json:"protocol,omitempty"`
 	Interval          *int                   `json:"interval,omitempty"`
+	// Bandwidth test fields
 	BitsPerSec        *int64                 `json:"bitsPerSec,omitempty"`
 	BytesTransferred  *int64                 `json:"bytesTransferred,omitempty"`
 	PacketsPerSec     *int64                 `json:"packetsPerSec,omitempty"`
+	// Connection test fields
 	ConnectionsPerSec *int64                 `json:"connectionsPerSec,omitempty"`
+	TotalConnections  *int64                 `json:"totalConnections,omitempty"`
+	// Latency test fields
 	LatencyMs         *float64               `json:"latencyMs,omitempty"`
+	LatencyAvg        *float64               `json:"latencyAvg,omitempty"`
+	LatencyMin        *float64               `json:"latencyMin,omitempty"`
+	LatencyMax        *float64               `json:"latencyMax,omitempty"`
+	LatencyP50        *float64               `json:"latencyP50,omitempty"`
+	LatencyP90        *float64               `json:"latencyP90,omitempty"`
+	LatencyP95        *float64               `json:"latencyP95,omitempty"`
+	LatencyP99        *float64               `json:"latencyP99,omitempty"`
+	LatencyP999       *float64               `json:"latencyP999,omitempty"`
+	LatencyP9999      *float64               `json:"latencyP9999,omitempty"`
+	// Network quality fields
 	JitterMs          *float64               `json:"jitterMs,omitempty"`
 	PacketLoss        *float64               `json:"packetLoss,omitempty"`
+	Retransmissions   *int64                 `json:"retransmissions,omitempty"`
+	// Ping test fields
+	PingSent          *int                   `json:"pingSent,omitempty"`
+	PingReceived      *int                   `json:"pingReceived,omitempty"`
+	PingLossPercent   *float64               `json:"pingLossPercent,omitempty"`
+	// Traceroute/MyTraceRoute fields
+	Hops              []TracerouteHop        `json:"hops,omitempty"`
+	HopNumber         *int                   `json:"hopNumber,omitempty"`
+	HopAddress        *string                `json:"hopAddress,omitempty"`
+	// Connection-level statistics
+	ConnectionId      *string                `json:"connectionId,omitempty"`
+	ConnectionBitsPerSec    *int64           `json:"connectionBitsPerSec,omitempty"`
+	ConnectionPacketsPerSec *int64           `json:"connectionPacketsPerSec,omitempty"`
+	// General metadata
 	Metadata          map[string]interface{} `json:"metadata,omitempty"`
 	// Test parameters (for display in UI)
 	TestParams        *TestParameters        `json:"testParams,omitempty"`
+}
+
+type TracerouteHop struct {
+	Hop          int      `json:"hop"`
+	Address      string   `json:"address,omitempty"`
+	Hostname     string   `json:"hostname,omitempty"`
+	Sent         int      `json:"sent"`
+	Received     int      `json:"received"`
+	LossPercent  float64  `json:"lossPercent"`
+	LastMs       *float64 `json:"lastMs,omitempty"`
+	AvgMs        *float64 `json:"avgMs,omitempty"`
+	BestMs       *float64 `json:"bestMs,omitempty"`
+	WorstMs      *float64 `json:"worstMs,omitempty"`
 }
 
 type TestParameters struct {
@@ -1043,7 +1141,8 @@ func executeServerMode(serverURL string, sessionId string, cmd TestCommand, canc
 	var intervalCounters = make(map[string]int) // Track interval counter per remote addr
 	var lastSessionID = make(map[string]string) // Track session ID for deterministic new test detection
 	
-	hubStatsCallback = func(remoteAddr string, proto EthrProtocol, bw, cps, pps, latency uint64, test *ethrTest) {
+	hubStatsCallback = func(remoteAddr string, proto EthrProtocol, testType EthrTestType, 
+		bw, cps, pps uint64, latencyStats *LatencyStats, hops []ethrHopData, test *ethrTest) {
 		newTestDetected := false
 		
 		if test != nil {
@@ -1108,21 +1207,62 @@ func executeServerMode(serverURL string, sessionId string, cmd TestCommand, canc
 		intervalCounters[remoteAddr]++
 		interval := intervalCounters[remoteAddr]
 		
-		// Convert to the format expected by the hub
-		bps := int64(bw * 8) // Convert bytes/sec to bits/sec
-		bytes := int64(bw)   // Bytes transferred in this second
-		pkts := int64(pps)
-		cpsVal := int64(cps)
-		
 		result := TestResult{
-			Timestamp:        time.Now(),
-			Source:           "server",
-			Type:             "interval",
-			Protocol:         protoToString(proto),
-			Interval:         &interval,
-			BitsPerSec:       &bps,
-			BytesTransferred: &bytes,
-			PacketsPerSec:    &pkts,
+			Timestamp: time.Now(),
+			Source:    "server",
+			Protocol:  protoToString(proto),
+		}
+		
+		// Handle different test types
+		switch testType {
+		case Bandwidth:
+			bps := int64(bw * 8) // Convert bytes/sec to bits/sec
+			bytes := int64(bw)   // Bytes transferred in this second
+			pkts := int64(pps)
+			
+			result.Type = "interval"
+			result.Interval = &interval
+			result.BitsPerSec = &bps
+			result.BytesTransferred = &bytes
+			result.PacketsPerSec = &pkts
+			
+		case Cps:
+			cpsVal := int64(cps)
+			result.Type = "interval"
+			result.Interval = &interval
+			result.ConnectionsPerSec = &cpsVal
+			
+		case Pps:
+			bps := int64(bw * 8)
+			pkts := int64(pps)
+			result.Type = "interval"
+			result.Interval = &interval
+			result.BitsPerSec = &bps
+			result.PacketsPerSec = &pkts
+			
+		case Latency:
+			if latencyStats != nil {
+				avgMs := float64(latencyStats.Avg.Microseconds()) / 1000.0
+				minMs := float64(latencyStats.Min.Microseconds()) / 1000.0
+				maxMs := float64(latencyStats.Max.Microseconds()) / 1000.0
+				p50Ms := float64(latencyStats.P50.Microseconds()) / 1000.0
+				p90Ms := float64(latencyStats.P90.Microseconds()) / 1000.0
+				p95Ms := float64(latencyStats.P95.Microseconds()) / 1000.0
+				p99Ms := float64(latencyStats.P99.Microseconds()) / 1000.0
+				p999Ms := float64(latencyStats.P999.Microseconds()) / 1000.0
+				p9999Ms := float64(latencyStats.P9999.Microseconds()) / 1000.0
+				
+				result.Type = "latency"
+				result.LatencyAvg = &avgMs
+				result.LatencyMin = &minMs
+				result.LatencyMax = &maxMs
+				result.LatencyP50 = &p50Ms
+				result.LatencyP90 = &p90Ms
+				result.LatencyP95 = &p95Ms
+				result.LatencyP99 = &p99Ms
+				result.LatencyP999 = &p999Ms
+				result.LatencyP9999 = &p9999Ms
+			}
 		}
 		
 		// Include test parameters from client on first interval for each remote address
@@ -1131,7 +1271,7 @@ func executeServerMode(serverURL string, sessionId string, cmd TestCommand, canc
 			
 			// Build test parameters from clientParam received in handshake
 			testTypeStr := "bandwidth"
-			switch test.testID.Type {
+			switch testType {
 			case Bandwidth:
 				testTypeStr = "bandwidth"
 			case Cps:
@@ -1167,16 +1307,10 @@ func executeServerMode(serverURL string, sessionId string, cmd TestCommand, canc
 			}
 		}
 		
-		if cps > 0 {
-			result.ConnectionsPerSec = &cpsVal
+		// Send result if it has meaningful data
+		if result.Type != "" {
+			sendResult(serverURL, sessionId, result, false)
 		}
-		
-		if latency > 0 {
-			latencyMs := float64(latency) / 1000.0 // Convert microseconds to milliseconds
-			result.LatencyMs = &latencyMs
-		}
-		
-		sendResult(serverURL, sessionId, result, false)
 	}
 	
 	// Start the actual ethr server in a goroutine
@@ -1298,7 +1432,7 @@ func buildTestParams(cmd TestCommand, protocol EthrProtocol, testType EthrTestTy
 		Protocol:    protoStr,
 		Threads:     cmd.Threads,
 		BufferSize:  bufferSize,
-		Duration:    cmd.DurationSeconds,
+		Duration:    parseDurationToSeconds(cmd.Duration),
 		Bandwidth:   bandwidth,
 		Reverse:     cmd.Reverse,
 		Destination: cmd.Destination,
@@ -1309,14 +1443,25 @@ func buildTestParams(cmd TestCommand, protocol EthrProtocol, testType EthrTestTy
 }
 
 func executeClientMode(serverURL string, sessionId string, cmd TestCommand, cancelChan chan struct{}) {
+	// Set global parameters from command
+	if cmd.BindIp != "" {
+		gLocalIP = cmd.BindIp
+	}
+	if cmd.ClientPort > 0 {
+		gClientPort = uint16(cmd.ClientPort)
+	}
+	if cmd.Tos > 0 {
+		gTOS = uint8(cmd.Tos)
+	}
+	
 	// Start ethr client
 	ui.printMsg("Starting client test to %s:%d", cmd.Destination, cmd.Port)
 	
 	// Build test ID from command
 	var protocol EthrProtocol
 	switch cmd.Protocol {
-	case "tcp":
-		protocol = TCP
+	case "tcp", "http", "https":
+		protocol = TCP // HTTP/HTTPS use TCP under the hood
 	case "udp":
 		protocol = UDP
 	case "icmp":
@@ -1364,12 +1509,40 @@ func executeClientMode(serverURL string, sessionId string, cmd TestCommand, canc
 		}
 	}
 	
+	// Parse gap parameter (e.g., "1s", "100ms")
+	gap := time.Second // Default 1s
+	if cmd.Gap != "" {
+		parsedGap, err := time.ParseDuration(cmd.Gap)
+		if err == nil && parsedGap > 0 {
+			gap = parsedGap
+		} else {
+			ui.printMsg("Warning: Invalid gap value '%s', using default 1s", cmd.Gap)
+		}
+	}
+	
+	// Get iterations (for latency tests)
+	rttCount := uint32(1000) // Default 1000
+	if cmd.Iterations > 0 {
+		rttCount = uint32(cmd.Iterations)
+	}
+	
+	// Get warmup count
+	warmupCount := uint32(1) // Default 1
+	if cmd.Warmup > 0 {
+		warmupCount = uint32(cmd.Warmup)
+	}
+	
 	clientParam := EthrClientParam{
-		NumThreads: uint32(cmd.Threads),
-		BufferSize: bufferSize,
-		Duration:   time.Duration(cmd.DurationSeconds) * time.Second,
-		Reverse:    cmd.Reverse,
-		BwRate:     bwRate,
+		NumThreads:       uint32(cmd.Threads),
+		BufferSize:       bufferSize,
+		Duration:         parseDurationToTime(cmd.Duration),
+		Reverse:          cmd.Reverse,
+		BwRate:           bwRate,
+		Gap:              gap,
+		RttCount:         rttCount,
+		WarmupCount:      warmupCount,
+		ToS:              uint8(cmd.Tos),
+		NoControlChannel: cmd.NoControlChannel,
 	}
 	
 	// Build test parameters for display (before goroutine so we can use it in results)
@@ -1464,38 +1637,156 @@ func executeClientMode(serverURL string, sessionId string, cmd TestCommand, canc
 		
 		// Set up stats callback to receive stats from ethr's native system
 		var intervalCounter int = 1
-		hubStatsCallback = func(remoteAddr string, proto EthrProtocol, bw, cps, pps, latency uint64, test *ethrTest) {
+		hubStatsCallback = func(remoteAddr string, proto EthrProtocol, testType EthrTestType, 
+			bw, cps, pps uint64, latencyStats *LatencyStats, hops []ethrHopData, test *ethrTest) {
 			if !test.isActive {
 				return
 			}
 			
-			bps := int64(bw * 8) // Convert bytes/sec to bits/sec
-			bytesTransferred := int64(bw) // This is already per-second from printTestResult
-			packetsPerSec := int64(pps)
-			
 			result := TestResult{
-				Timestamp:        time.Now(),
-				Source:           "client",
-				Type:             "interval",
-				Protocol:         cmd.Protocol,
-				Interval:         &intervalCounter,
-				BitsPerSec:       &bps,
-				BytesTransferred: &bytesTransferred,
-				PacketsPerSec:    &packetsPerSec,
+				Timestamp: time.Now(),
+				Source:    "client",
+				Protocol:  cmd.Protocol,
 			}
 			
-			// Include test parameters in the first interval result
-			if intervalCounter == 1 {
-				result.TestParams = testParams
+			// Handle different test types
+			switch testType {
+			case Bandwidth:
+				bps := int64(bw * 8) // Convert bytes/sec to bits/sec
+				bytesTransferred := int64(bw) // This is already per-second from printTestResult
+				packetsPerSec := int64(pps)
+				
+				result.Type = "interval"
+				result.Interval = &intervalCounter
+				result.BitsPerSec = &bps
+				result.BytesTransferred = &bytesTransferred
+				result.PacketsPerSec = &packetsPerSec
+				
+				// Include test parameters in the first interval result
+				if intervalCounter == 1 {
+					result.TestParams = testParams
+				}
+				intervalCounter++
+				
+			case Cps:
+				cpsVal := int64(cps)
+				result.Type = "interval"
+				result.Interval = &intervalCounter
+				result.ConnectionsPerSec = &cpsVal
+				
+				if intervalCounter == 1 {
+					result.TestParams = testParams
+				}
+				intervalCounter++
+				
+			case Pps:
+				bps := int64(bw * 8)
+				packetsPerSec := int64(pps)
+				result.Type = "interval"
+				result.Interval = &intervalCounter
+				result.BitsPerSec = &bps
+				result.PacketsPerSec = &packetsPerSec
+				
+				if intervalCounter == 1 {
+					result.TestParams = testParams
+				}
+				intervalCounter++
+				
+			case Latency:
+				if latencyStats != nil {
+					avgMs := float64(latencyStats.Avg.Microseconds()) / 1000.0
+					minMs := float64(latencyStats.Min.Microseconds()) / 1000.0
+					maxMs := float64(latencyStats.Max.Microseconds()) / 1000.0
+					p50Ms := float64(latencyStats.P50.Microseconds()) / 1000.0
+					p90Ms := float64(latencyStats.P90.Microseconds()) / 1000.0
+					p95Ms := float64(latencyStats.P95.Microseconds()) / 1000.0
+					p99Ms := float64(latencyStats.P99.Microseconds()) / 1000.0
+					p999Ms := float64(latencyStats.P999.Microseconds()) / 1000.0
+					p9999Ms := float64(latencyStats.P9999.Microseconds()) / 1000.0
+					
+					result.Type = "latency"
+					result.LatencyAvg = &avgMs
+					result.LatencyMin = &minMs
+					result.LatencyMax = &maxMs
+					result.LatencyP50 = &p50Ms
+					result.LatencyP90 = &p90Ms
+					result.LatencyP95 = &p95Ms
+					result.LatencyP99 = &p99Ms
+					result.LatencyP999 = &p999Ms
+					result.LatencyP9999 = &p9999Ms
+					result.TestParams = testParams
+				}
+				
+			case MyTraceRoute:
+				if hops != nil && len(hops) > 0 {
+					result.Type = "mytraceroute"
+					result.Hops = make([]TracerouteHop, 0, len(hops))
+					
+					for i, hopData := range hops {
+						if hopData.addr != "" && hopData.sent > 0 {
+							hop := TracerouteHop{
+								Hop:      i + 1,
+								Address:  hopData.addr,
+								Hostname: hopData.name,
+								Sent:     int(hopData.sent),
+								Received: int(hopData.rcvd),
+							}
+							
+							if hopData.sent > 0 {
+								hop.LossPercent = float64(hopData.lost) / float64(hopData.sent) * 100
+							}
+							
+							if hopData.rcvd > 0 {
+								lastMs := float64(hopData.last.Microseconds()) / 1000.0
+								avgMs := float64(hopData.total.Nanoseconds()/int64(hopData.rcvd)) / 1000000.0
+								bestMs := float64(hopData.best.Microseconds()) / 1000.0
+								worstMs := float64(hopData.worst.Microseconds()) / 1000.0
+								
+								hop.LastMs = &lastMs
+								hop.AvgMs = &avgMs
+								hop.BestMs = &bestMs
+								hop.WorstMs = &worstMs
+							}
+							
+							result.Hops = append(result.Hops, hop)
+						}
+					}
+					result.TestParams = testParams
+				}
+				
+			case Ping:
+				// Ping results are typically sent as metadata in other messages
+				// If we receive hop data with a single entry, treat it as ping
+				if hops != nil && len(hops) == 1 {
+					hopData := hops[0]
+					result.Type = "ping"
+					sent := int(hopData.sent)
+					rcvd := int(hopData.rcvd)
+					result.PingSent = &sent
+					result.PingReceived = &rcvd
+					
+					if hopData.sent > 0 {
+						lossPercent := float64(hopData.lost) / float64(hopData.sent) * 100
+						result.PingLossPercent = &lossPercent
+					}
+					
+					if hopData.rcvd > 0 {
+						avgMs := float64(hopData.total.Nanoseconds()/int64(hopData.rcvd)) / 1000000.0
+						minMs := float64(hopData.best.Microseconds()) / 1000.0
+						maxMs := float64(hopData.worst.Microseconds()) / 1000.0
+						
+						result.LatencyAvg = &avgMs
+						result.LatencyMin = &minMs
+						result.LatencyMax = &maxMs
+					}
+					result.TestParams = testParams
+				}
 			}
 			
-			if testType == Latency && latency > 0 {
-				latencyMs := float64(latency) / 1000.0 // Convert microseconds to milliseconds
-				result.LatencyMs = &latencyMs
+			// Send result if it has meaningful data
+			if result.Type != "" {
+				sendResult(serverURL, sessionId, result, false)
 			}
-			
-			sendResult(serverURL, sessionId, result, false)
-			intervalCounter++
 		}
 		
 		// Mark test as started (for defer cleanup and summary)
@@ -1539,6 +1830,17 @@ func executeClientMode(serverURL string, sessionId string, cmd TestCommand, canc
 }
 
 func executeExternalMode(serverURL string, sessionId string, cmd TestCommand, cancelChan chan struct{}) {
+	// Set global parameters from command
+	if cmd.BindIp != "" {
+		gLocalIP = cmd.BindIp
+	}
+	if cmd.ClientPort > 0 {
+		gClientPort = uint16(cmd.ClientPort)
+	}
+	if cmd.Tos > 0 {
+		gTOS = uint8(cmd.Tos)
+	}
+	
 	// External mode: Run ping, traceroute, or mytraceroute against any destination
 	ui.printMsg("Starting external test (%s) to %s:%d", cmd.TestType, cmd.Destination, cmd.Port)
 	
@@ -1548,7 +1850,7 @@ func executeExternalMode(serverURL string, sessionId string, cmd TestCommand, ca
 	// Build test ID from command
 	var protocol EthrProtocol
 	switch cmd.Protocol {
-	case "tcp":
+	case "tcp", "http", "https":
 		protocol = TCP
 	case "udp":
 		protocol = UDP
@@ -1560,6 +1862,8 @@ func executeExternalMode(serverURL string, sessionId string, cmd TestCommand, ca
 	
 	var testType EthrTestType
 	switch cmd.TestType {
+	case "c":
+		testType = Cps
 	case "pi":
 		testType = Ping
 	case "tr":
@@ -1567,7 +1871,7 @@ func executeExternalMode(serverURL string, sessionId string, cmd TestCommand, ca
 	case "mtr":
 		testType = MyTraceRoute
 	default:
-		ui.printErr("Invalid test type for external mode: %s (only pi, tr, mtr allowed)", cmd.TestType)
+		ui.printErr("Invalid test type for external mode: %s (only c, pi, tr, mtr allowed)", cmd.TestType)
 		updateSessionStatus(serverURL, sessionId, "Failed", "Invalid test type for external mode")
 		return
 	}
@@ -1577,10 +1881,30 @@ func executeExternalMode(serverURL string, sessionId string, cmd TestCommand, ca
 		Protocol: protocol,
 	}
 	
+	// Parse gap parameter
+	gap := time.Second // Default 1s
+	if cmd.Gap != "" {
+		parsedGap, err := time.ParseDuration(cmd.Gap)
+		if err == nil && parsedGap > 0 {
+			gap = parsedGap
+		} else {
+			ui.printMsg("Warning: Invalid gap value '%s', using default 1s", cmd.Gap)
+		}
+	}
+	
+	// Get warmup count
+	warmupCount := uint32(1) // Default 1
+	if cmd.Warmup > 0 {
+		warmupCount = uint32(cmd.Warmup)
+	}
+	
 	// Build client parameters
 	clientParam := EthrClientParam{
-		NumThreads: 1, // External tests typically use 1 thread
-		Duration:   time.Duration(cmd.DurationSeconds) * time.Second,
+		NumThreads:  uint32(cmd.Threads),
+		Duration:    parseDurationToTime(cmd.Duration),
+		Gap:         gap,
+		WarmupCount: warmupCount,
+		ToS:         uint8(cmd.Tos),
 	}
 	
 	// Build test parameters for display
@@ -1653,9 +1977,10 @@ func executeExternalMode(serverURL string, sessionId string, cmd TestCommand, ca
 			test.dialAddr = fmt.Sprintf("[%s]:%s", hostIP, port)
 		}
 		
-		// Set up stats callback for external tests (mainly for ping latency)
+		// Set up stats callback for external tests (ping, traceroute, mytraceroute)
 		var intervalCounter int = 1
-		hubStatsCallback = func(remoteAddr string, proto EthrProtocol, bw, cps, pps, latency uint64, test *ethrTest) {
+		hubStatsCallback = func(remoteAddr string, proto EthrProtocol, testTypeCallback EthrTestType, 
+			bw, cps, pps uint64, latencyStats *LatencyStats, hops []ethrHopData, test *ethrTest) {
 			if !test.isActive {
 				return
 			}
@@ -1663,23 +1988,74 @@ func executeExternalMode(serverURL string, sessionId string, cmd TestCommand, ca
 			result := TestResult{
 				Timestamp: time.Now(),
 				Source:    "external",
-				Type:      "interval",
 				Protocol:  cmd.Protocol,
-				Interval:  &intervalCounter,
 			}
 			
-			// Include test parameters in the first interval result
-			if intervalCounter == 1 {
-				result.TestParams = testParams
+			// Handle different external test types
+			switch testTypeCallback {
+			case Ping:
+				if latencyStats != nil {
+					avgMs := float64(latencyStats.Avg.Microseconds()) / 1000.0
+					minMs := float64(latencyStats.Min.Microseconds()) / 1000.0
+					maxMs := float64(latencyStats.Max.Microseconds()) / 1000.0
+					p50Ms := float64(latencyStats.P50.Microseconds()) / 1000.0
+					p90Ms := float64(latencyStats.P90.Microseconds()) / 1000.0
+					p95Ms := float64(latencyStats.P95.Microseconds()) / 1000.0
+					p99Ms := float64(latencyStats.P99.Microseconds()) / 1000.0
+					
+					result.Type = "ping"
+					result.LatencyAvg = &avgMs
+					result.LatencyMin = &minMs
+					result.LatencyMax = &maxMs
+					result.LatencyP50 = &p50Ms
+					result.LatencyP90 = &p90Ms
+					result.LatencyP95 = &p95Ms
+					result.LatencyP99 = &p99Ms
+					result.TestParams = testParams
+				}
+				
+			case MyTraceRoute, TraceRoute:
+				if hops != nil && len(hops) > 0 {
+					result.Type = "mytraceroute"
+					result.Hops = make([]TracerouteHop, 0, len(hops))
+					
+					for i, hopData := range hops {
+						if hopData.addr != "" && hopData.sent > 0 {
+							hop := TracerouteHop{
+								Hop:      i + 1,
+								Address:  hopData.addr,
+								Hostname: hopData.name,
+								Sent:     int(hopData.sent),
+								Received: int(hopData.rcvd),
+							}
+							
+							if hopData.sent > 0 {
+								hop.LossPercent = float64(hopData.lost) / float64(hopData.sent) * 100
+							}
+							
+							if hopData.rcvd > 0 {
+								lastMs := float64(hopData.last.Microseconds()) / 1000.0
+								avgMs := float64(hopData.total.Nanoseconds()/int64(hopData.rcvd)) / 1000000.0
+								bestMs := float64(hopData.best.Microseconds()) / 1000.0
+								worstMs := float64(hopData.worst.Microseconds()) / 1000.0
+								
+								hop.LastMs = &lastMs
+								hop.AvgMs = &avgMs
+								hop.BestMs = &bestMs
+								hop.WorstMs = &worstMs
+							}
+							
+							result.Hops = append(result.Hops, hop)
+						}
+					}
+					result.TestParams = testParams
+				}
 			}
 			
-			// For ping tests, report latency
-			if testType == Ping && latency > 0 {
-				latencyMs := float64(latency) / 1000.0 // Convert microseconds to milliseconds
-				result.LatencyMs = &latencyMs
+			// Send result if it has meaningful data
+			if result.Type != "" {
+				sendResult(serverURL, sessionId, result, false)
 			}
-			
-			sendResult(serverURL, sessionId, result, false)
 			intervalCounter++
 		}
 		

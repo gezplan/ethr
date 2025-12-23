@@ -495,7 +495,16 @@ func getTestResults(s *ethrSession, proto EthrProtocol, seconds float64) []strin
 		
 		// Call hub callback if registered (for hub integration mode)
 		if hubStatsCallback != nil {
-			hubStatsCallback(s.remoteIP, proto, bw, cps, pps, latency, test)
+			// Determine which test type is active based on what metrics are available
+			testType := Bandwidth
+			if cpsTestOn && cps > 0 {
+				testType = Cps
+			} else if ppsTestOn && pps > 0 {
+				testType = Pps
+			} else if latTestOn && latency > 0 {
+				testType = Latency
+			}
+			hubStatsCallback(s.remoteIP, proto, testType, bw, cps, pps, nil, nil, test)
 		}
 		
 		str := []string{s.remoteIP, protoToString(proto),
