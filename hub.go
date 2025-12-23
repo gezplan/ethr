@@ -1482,6 +1482,12 @@ func executeClientMode(serverURL string, sessionId string, cmd TestCommand, canc
 		testType = Pps
 	case "l":
 		testType = Latency
+	case "pi":
+		testType = Ping
+	case "tr":
+		testType = TraceRoute
+	case "mtr":
+		testType = MyTraceRoute
 	default:
 		testType = Bandwidth
 	}
@@ -1567,17 +1573,35 @@ func executeClientMode(serverURL string, sessionId string, cmd TestCommand, canc
 				if duration > 0 {
 					avgBps := int64(float64(totalBw*8) / duration)
 
+					metadata := map[string]interface{}{
+						"totalBytes":   totalBw,
+						"totalPackets": totalPps,
+						"duration":     duration,
+					}
+
+					// For PPS tests, include server-side packet stats if available
+					if test.ctrlResults != nil {
+						serverPackets := test.ctrlResults.Packets
+						serverBytes := test.ctrlResults.Bandwidth
+						metadata["serverPackets"] = serverPackets
+						metadata["serverBytes"] = serverBytes
+
+						// Calculate packet loss for UDP/PPS tests
+						if totalPps > 0 && serverPackets < totalPps {
+							lostPackets := totalPps - serverPackets
+							lossPercent := float64(lostPackets) / float64(totalPps) * 100
+							metadata["lostPackets"] = lostPackets
+							metadata["lossPercent"] = lossPercent
+						}
+					}
+
 					sendResult(serverURL, sessionId, TestResult{
 						Timestamp:  time.Now(),
 						Source:     "client",
 						Type:       "summary",
 						Protocol:   cmd.Protocol,
 						BitsPerSec: &avgBps,
-						Metadata: map[string]interface{}{
-							"totalBytes":   totalBw,
-							"totalPackets": totalPps,
-							"duration":     duration,
-						},
+						Metadata:   metadata,
 						TestParams: testParams,
 					}, true)
 				}
@@ -1816,6 +1840,40 @@ func executeClientMode(serverURL string, sessionId string, cmd TestCommand, canc
 			if result.Type != "" {
 				sendResult(serverURL, sessionId, result, false)
 			}
+		}
+
+		// Set up individual ping callback for client mode ping tests
+		var pingSequence int = 1
+		hubPingCallback = func(localAddr, remoteAddr string, proto EthrProtocol, latency time.Duration, pingErr error, test *ethrTest) {
+			if !test.isActive {
+				return
+			}
+
+			result := TestResult{
+				Timestamp:  time.Now(),
+				Source:     "client",
+				Protocol:   cmd.Protocol,
+				Type:       "ping_result",
+				TestParams: testParams,
+			}
+
+			latencyMs := float64(latency.Microseconds()) / 1000.0
+			success := pingErr == nil
+
+			result.Metadata = map[string]interface{}{
+				"sequence":   pingSequence,
+				"localAddr":  localAddr,
+				"remoteAddr": remoteAddr,
+				"latencyMs":  latencyMs,
+				"success":    success,
+			}
+
+			if pingErr != nil {
+				result.Metadata["error"] = pingErr.Error()
+			}
+
+			sendResult(serverURL, sessionId, result, false)
+			pingSequence++
 		}
 
 		// Mark test as started (for defer cleanup and summary)
