@@ -231,8 +231,9 @@ type StatusUpdateRequest struct {
 }
 
 type HeartbeatRequest struct {
-	AgentId string `json:"agentId"`
-	Status  string `json:"status"`
+	AgentId           string   `json:"agentId"`
+	Status            string   `json:"status"`
+	RunningSessionIds []string `json:"runningSessionIds,omitempty"` // Sessions the agent is actively running
 }
 
 var hubAuth *HubAuth
@@ -467,7 +468,7 @@ func runHubAgent(config HubConfig) {
 	}
 
 	// Try to load saved tokens first
-	loadedAccessToken, loadedRefreshToken, expiresAt, err := loadTokens(config.ServerURL)
+	_, loadedRefreshToken, expiresAt, err := loadTokens(config.ServerURL)
 	if err == nil && loadedRefreshToken != "" {
 		ui.printMsg("Found saved credentials for this hub, attempting automatic login...")
 		ui.printDbg("Loaded token expires at: %v (in %v)", expiresAt, time.Until(expiresAt))
@@ -480,11 +481,24 @@ func runHubAgent(config HubConfig) {
 		}
 
 		if time.Now().Before(expiresAt.Add(-bufferTime)) {
-			// Access token is still valid
-			ui.printDbg("Using cached access token (valid for %v more)", time.Until(expiresAt))
-			hubAuth.AccessToken = loadedAccessToken
-			hubAuth.RefreshToken = loadedRefreshToken
-			hubAuth.ExpiresAt = expiresAt
+			// Access token looks valid, but validate refresh token to catch server restarts
+			ui.printDbg("Validating refresh token before using cached credentials...")
+			tokenResp, err := tryRefreshToken(config.ServerURL, loadedRefreshToken)
+			if err == nil {
+				// Refresh token is valid, use the new tokens
+				ui.printDbg("Refresh token validated successfully")
+				hubAuth.AccessToken = tokenResp.AccessToken
+				hubAuth.RefreshToken = tokenResp.RefreshToken
+				hubAuth.ExpiresAt = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
+				saveTokens(config.ServerURL, tokenResp.AccessToken, tokenResp.RefreshToken, tokenResp.ExpiresIn)
+			} else {
+				// Refresh token is invalid (server may have restarted)
+				ui.printMsg("Saved refresh token is invalid: %v", err)
+				ui.printMsg("Clearing saved credentials and starting new authentication...")
+				clearTokens(config.ServerURL)
+				hubAuth = &HubAuth{}
+				// Will fall through to device auth below
+			}
 		} else {
 			// Try to refresh the token
 			ui.printDbg("Access token expired or expiring soon, refreshing...")
@@ -920,10 +934,19 @@ func heartbeatLoop(serverURL string) {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		ui.printDbg("Sending heartbeat...")
+		// Collect running session IDs
+		runningTests.RLock()
+		runningSessionIds := make([]string, 0, len(runningTests.tests))
+		for sessionId := range runningTests.tests {
+			runningSessionIds = append(runningSessionIds, sessionId)
+		}
+		runningTests.RUnlock()
+
+		ui.printDbg("Sending heartbeat with %d running sessions...", len(runningSessionIds))
 		reqBody, _ := json.Marshal(HeartbeatRequest{
-			AgentId: hubAgentId,
-			Status:  "Connected",
+			AgentId:           hubAgentId,
+			Status:            "Connected",
+			RunningSessionIds: runningSessionIds,
 		})
 
 		httpReq, err := http.NewRequest("POST", serverURL+"/api/cli/agent/heartbeat", bytes.NewBuffer(reqBody))
@@ -955,20 +978,32 @@ func heartbeatLoop(serverURL string) {
 			tokenResp, err := tryRefreshToken(serverURL, refreshToken)
 			if err != nil {
 				// Refresh failed - maybe another process already refreshed?
-				// Try re-reading tokens from disk before giving up
+				// Try re-reading tokens from disk and validate them
 				ui.printDbg("Refresh failed, re-reading tokens from disk...")
-				accessToken, refreshToken, expiresAt, loadErr := loadTokens(serverURL)
-				if loadErr == nil {
-					hubAuth.mu.Lock()
-					hubAuth.AccessToken = accessToken
-					hubAuth.RefreshToken = refreshToken
-					hubAuth.ExpiresAt = expiresAt
-					hubAuth.mu.Unlock()
-					ui.printDbg("Loaded updated tokens from disk, will retry on next heartbeat")
-					continue
+				_, diskRefreshToken, _, loadErr := loadTokens(serverURL)
+				if loadErr == nil && diskRefreshToken != refreshToken {
+					// Different token on disk - another process refreshed, try those
+					ui.printDbg("Found different tokens on disk, validating...")
+					tokenResp, err = tryRefreshToken(serverURL, diskRefreshToken)
+					if err == nil {
+						// Disk tokens are valid, use the refreshed ones
+						hubAuth.mu.Lock()
+						hubAuth.AccessToken = tokenResp.AccessToken
+						hubAuth.RefreshToken = tokenResp.RefreshToken
+						hubAuth.ExpiresAt = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
+						hubAuth.mu.Unlock()
+						saveTokens(serverURL, tokenResp.AccessToken, tokenResp.RefreshToken, tokenResp.ExpiresIn)
+						ui.printDbg("Disk tokens validated and refreshed successfully")
+						continue
+					}
+					// Disk tokens also invalid, fall through to re-auth
+					ui.printDbg("Disk tokens also invalid")
+				} else if loadErr == nil {
+					// Same token on disk - tokens are truly invalid
+					ui.printDbg("Same tokens on disk, need re-authentication")
 				}
 
-				// Still failed - refresh token is invalid (server restarted or token expired)
+				// Refresh token is invalid (server restarted or token expired)
 				// Clear tokens and re-authenticate
 				ui.printMsg("Refresh token invalid, re-authenticating...")
 				clearTokens(serverURL)
@@ -1686,9 +1721,10 @@ func executeClientMode(serverURL string, sessionId string, cmd TestCommand, canc
 				bps := int64(bw * 8)          // Convert bytes/sec to bits/sec
 				bytesTransferred := int64(bw) // This is already per-second from printTestResult
 				packetsPerSec := int64(pps)
+				currentInterval := intervalCounter // Capture value before incrementing
 
 				result.Type = "interval"
-				result.Interval = &intervalCounter
+				result.Interval = &currentInterval
 				result.BitsPerSec = &bps
 				result.BytesTransferred = &bytesTransferred
 				result.PacketsPerSec = &packetsPerSec
@@ -1701,8 +1737,9 @@ func executeClientMode(serverURL string, sessionId string, cmd TestCommand, canc
 
 			case Cps:
 				cpsVal := int64(cps)
+				currentInterval := intervalCounter // Capture value before incrementing
 				result.Type = "interval"
-				result.Interval = &intervalCounter
+				result.Interval = &currentInterval
 				result.ConnectionsPerSec = &cpsVal
 
 				if intervalCounter == 1 {
@@ -1713,8 +1750,9 @@ func executeClientMode(serverURL string, sessionId string, cmd TestCommand, canc
 			case Pps:
 				bps := int64(bw * 8)
 				packetsPerSec := int64(pps)
+				currentInterval := intervalCounter // Capture value before incrementing
 				result.Type = "interval"
-				result.Interval = &intervalCounter
+				result.Interval = &currentInterval
 				result.BitsPerSec = &bps
 				result.PacketsPerSec = &packetsPerSec
 
@@ -2239,6 +2277,23 @@ func sendResult(serverURL string, sessionId string, result TestResult, isFinal b
 		Result:    result,
 		IsFinal:   isFinal,
 	})
+
+	// Debug tracing: Print what we're sending (only with -debug flag)
+	if result.Type == "interval" && result.Interval != nil {
+		intervalNum := *result.Interval
+		var bps, bytes, pkts int64
+		if result.BitsPerSec != nil {
+			bps = *result.BitsPerSec
+		}
+		if result.BytesTransferred != nil {
+			bytes = *result.BytesTransferred
+		}
+		if result.PacketsPerSec != nil {
+			pkts = *result.PacketsPerSec
+		}
+		ui.printDbg("[HUB] Sending interval=%d, bps=%d, bytes=%d, pps=%d, source=%s",
+			intervalNum, bps, bytes, pkts, result.Source)
+	}
 
 	httpReq, err := http.NewRequest("POST", serverURL+"/api/cli/agent/result", bytes.NewBuffer(reqBody))
 	if err != nil {
