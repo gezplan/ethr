@@ -505,7 +505,7 @@ func runHubAgent(config HubConfig) {
 				hubAuth.AccessToken = tokenResp.AccessToken
 				hubAuth.RefreshToken = tokenResp.RefreshToken
 				hubAuth.ExpiresAt = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
-				saveTokens(config.ServerURL, tokenResp.AccessToken, tokenResp.RefreshToken, tokenResp.ExpiresIn)
+				_ = saveTokens(config.ServerURL, tokenResp.AccessToken, tokenResp.RefreshToken, tokenResp.ExpiresIn)
 			} else {
 				// Refresh token is invalid (server may have restarted)
 				ui.printMsg("Saved refresh token is invalid: %v", err)
@@ -526,7 +526,7 @@ func runHubAgent(config HubConfig) {
 				hubAuth.ExpiresAt = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
 
 				// Save new tokens
-				saveTokens(config.ServerURL, tokenResp.AccessToken, tokenResp.RefreshToken, tokenResp.ExpiresIn)
+				_ = saveTokens(config.ServerURL, tokenResp.AccessToken, tokenResp.RefreshToken, tokenResp.ExpiresIn)
 				ui.printDbg("New tokens saved, expires at: %v", hubAuth.ExpiresAt)
 			} else {
 				ui.printMsg("Token refresh failed: %v", err)
@@ -548,7 +548,7 @@ func runHubAgent(config HubConfig) {
 		}
 
 		// Save tokens after successful auth
-		saveTokens(config.ServerURL, hubAuth.AccessToken, hubAuth.RefreshToken, 3600)
+		_ = saveTokens(config.ServerURL, hubAuth.AccessToken, hubAuth.RefreshToken, 3600)
 		ui.printMsg("Credentials saved for future use")
 	}
 
@@ -576,7 +576,7 @@ func runHubAgent(config HubConfig) {
 					hubAuth.mu.Unlock()
 
 					// Save new tokens
-					saveTokens(config.ServerURL, tokenResp.AccessToken, tokenResp.RefreshToken, tokenResp.ExpiresIn)
+					_ = saveTokens(config.ServerURL, tokenResp.AccessToken, tokenResp.RefreshToken, tokenResp.ExpiresIn)
 
 					// Retry registration
 					err = registerAgent(config.ServerURL, config.Title)
@@ -588,7 +588,7 @@ func runHubAgent(config HubConfig) {
 						ui.printErr("Authentication failed: %v", err)
 						os.Exit(1)
 					}
-					saveTokens(config.ServerURL, hubAuth.AccessToken, hubAuth.RefreshToken, 3600)
+					_ = saveTokens(config.ServerURL, hubAuth.AccessToken, hubAuth.RefreshToken, 3600)
 					err = registerAgent(config.ServerURL, config.Title)
 				}
 			}
@@ -949,7 +949,7 @@ func tokenRefreshLoop(serverURL string) {
 		hubAuth.mu.Unlock()
 
 		// Save refreshed tokens to disk
-		saveTokens(serverURL, tokenResp.AccessToken, tokenResp.RefreshToken, tokenResp.ExpiresIn)
+		_ = saveTokens(serverURL, tokenResp.AccessToken, tokenResp.RefreshToken, tokenResp.ExpiresIn)
 
 		// Release lock after saving
 		releaseTokenLock(lockPath)
@@ -1021,7 +1021,7 @@ func heartbeatLoop(serverURL string) {
 						hubAuth.RefreshToken = tokenResp.RefreshToken
 						hubAuth.ExpiresAt = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
 						hubAuth.mu.Unlock()
-						saveTokens(serverURL, tokenResp.AccessToken, tokenResp.RefreshToken, tokenResp.ExpiresIn)
+						_ = saveTokens(serverURL, tokenResp.AccessToken, tokenResp.RefreshToken, tokenResp.ExpiresIn)
 						ui.printDbg("Disk tokens validated and refreshed successfully")
 						continue
 					}
@@ -1043,7 +1043,7 @@ func heartbeatLoop(serverURL string) {
 					continue
 				}
 
-				saveTokens(serverURL, hubAuth.AccessToken, hubAuth.RefreshToken, 3600)
+				_ = saveTokens(serverURL, hubAuth.AccessToken, hubAuth.RefreshToken, 3600)
 				ui.printMsg("Re-authentication successful")
 
 				// Also need to re-register since server may have restarted
@@ -1062,7 +1062,7 @@ func heartbeatLoop(serverURL string) {
 			hubAuth.ExpiresAt = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
 			hubAuth.mu.Unlock()
 
-			saveTokens(serverURL, tokenResp.AccessToken, tokenResp.RefreshToken, tokenResp.ExpiresIn)
+			_ = saveTokens(serverURL, tokenResp.AccessToken, tokenResp.RefreshToken, tokenResp.ExpiresIn)
 			ui.printDbg("Token refreshed successfully, next heartbeat will use new token")
 		} else if resp.StatusCode == http.StatusNotFound {
 			// Agent not found (server probably restarted), re-register

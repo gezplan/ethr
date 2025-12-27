@@ -317,9 +317,9 @@ func ethrSetTTL(fd uintptr, ttl int) {
 		return
 	}
 	if gIPVersion == ethrIPv4 {
-		setSockOptInt(fd, syscall.IPPROTO_IP, syscall.IP_TTL, ttl)
+		_ = setSockOptInt(fd, syscall.IPPROTO_IP, syscall.IP_TTL, ttl)
 	} else {
-		setSockOptInt(fd, syscall.IPPROTO_IPV6, syscall.IPV6_UNICAST_HOPS, ttl)
+		_ = setSockOptInt(fd, syscall.IPPROTO_IPV6, syscall.IPV6_UNICAST_HOPS, ttl)
 	}
 }
 
@@ -328,7 +328,7 @@ func ethrSetTOS(fd uintptr, tos int) {
 		return
 	}
 	if gIPVersion == ethrIPv4 {
-		setSockOptInt(fd, syscall.IPPROTO_IP, syscall.IP_TOS, tos)
+		_ = setSockOptInt(fd, syscall.IPPROTO_IP, syscall.IP_TOS, tos)
 	} else {
 		SetTClass(fd, tos)
 	}

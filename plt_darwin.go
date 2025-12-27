@@ -55,12 +55,11 @@ func getTCPStats(stats *ethrNetStat) {
 		return
 	}
 	buf := bytes.NewReader(rawData)
-	binary.Read(buf, binary.LittleEndian, &data)
+	_ = binary.Read(buf, binary.LittleEndian, &data)
 
 	// return EthrTCPStat{uint64(data.Sndrexmitpack)}, nil
 	// return the TCP Retransmits
 	stats.tcpStats.segRetrans = uint64(data.Sndrexmitpack)
-	return
 }
 
 func hideCursor() {
@@ -402,7 +401,7 @@ func IsAdmin() bool {
 }
 
 func SetTClass(fd uintptr, tos int) {
-	setSockOptInt(fd, syscall.IPPROTO_IPV6, syscall.IPV6_TCLASS, tos)
+	_ = setSockOptInt(fd, syscall.IPPROTO_IPV6, syscall.IPV6_TCLASS, tos)
 }
 
 // WinIcmpProbe is a stub for Darwin - Windows ICMP API is not available

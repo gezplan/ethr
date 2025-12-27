@@ -288,7 +288,7 @@ func getTestInternal(remoteIP string, proto EthrProtocol, testType EthrTestType)
 	if !found {
 		return
 	}
-	test, _ = session.tests[EthrTestID{proto, testType}]
+	test = session.tests[EthrTestID{proto, testType}]
 	return
 }
 

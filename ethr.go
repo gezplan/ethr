@@ -199,9 +199,8 @@ func main() {
 	var destination string
 	if *isServer {
 		// Server side parameter processing.
-		testType = All
 		serverParam := ethrServerParam{showUI: *showUI, oneClient: *oneClient}
-		runServer(serverParam)
+		_ = runServer(serverParam)
 	} else if *hubURL != "" {
 		// Hub integration mode - connect to hub and await commands
 		initClient("")

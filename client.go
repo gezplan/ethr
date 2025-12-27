@@ -266,7 +266,6 @@ func runTest(test *ethrTest) {
 	case disconnect:
 		ui.printMsg("Ethr done, connection terminated.")
 	}
-	return
 }
 
 // tcpRunBandwidthTestInBandSync runs bandwidth test with in-band synchronization
@@ -708,7 +707,7 @@ ExitForLoop:
 			break ExitForLoop
 		default:
 			n := 0
-			var err error = nil
+			var err error
 			if test.clientParam.Reverse {
 				n, err = conn.Read(buff)
 			} else {
@@ -1009,7 +1008,7 @@ func clientRunPingTest(test *ethrTest, g time.Duration, warmupCount uint32) {
 					t0 := time.Now()
 					if warmupCount > 0 {
 						warmupCount--
-						clientRunPing(test, warmupText)
+						_, _ = clientRunPing(test, warmupText)
 					} else {
 						sent++
 						latency, err := clientRunPing(test, "")
@@ -1174,7 +1173,7 @@ func tcpProbe(test *ethrTest, hop int, hopIP string, hopData *ethrHopData) (erro
 	localPortNum += uint16(hop)
 	b := make([]byte, 4)
 	binary.BigEndian.PutUint16(b[0:], localPortNum)
-	remotePortNum, err := strconv.ParseUint(test.remotePort, 10, 16)
+	remotePortNum, _ := strconv.ParseUint(test.remotePort, 10, 16)
 	binary.BigEndian.PutUint16(b[2:], uint16(remotePortNum))
 	peerAddrChan := make(chan string)
 	endTimeChan := make(chan time.Time)
@@ -1756,7 +1755,7 @@ func runUDPBandwidthAndPpsTestWithCtrl(test *ethrTest, toStop chan int, duration
 	var startTime time.Time
 	if delayNs == 0 {
 		ethrMsg = createSyncGoMsg(rttNs)
-		sendSessionMsg(ctrlConn, ethrMsg)
+		_ = sendSessionMsg(ctrlConn, ethrMsg)
 		startTime = time.Now()
 	} else {
 		oneWayLatency := rtt / 2
@@ -1766,7 +1765,7 @@ func runUDPBandwidthAndPpsTestWithCtrl(test *ethrTest, toStop chan int, duration
 		}
 		startTime = time.Now().Add(adjustedDelay)
 		ethrMsg = createSyncGoMsg(rttNs)
-		sendSessionMsg(ctrlConn, ethrMsg)
+		_ = sendSessionMsg(ctrlConn, ethrMsg)
 		waitUntilTime(startTime)
 	}
 

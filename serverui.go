@@ -381,7 +381,7 @@ func emitAggregateResults() {
 
 func emitAggregate(proto EthrProtocol) {
 	str := []string{}
-	aggTestResult, _ := gAggregateTestResults[proto]
+	aggTestResult := gAggregateTestResults[proto]
 	if aggTestResult.cbw > 1 || aggTestResult.ccps > 1 || aggTestResult.cpps > 1 {
 		str = []string{"[SUM]", protoToString(proto),
 			bytesToRate(aggTestResult.bw),
@@ -403,7 +403,7 @@ func emitAggregate(proto EthrProtocol) {
 func getTestResults(s *ethrSession, proto EthrProtocol, seconds float64) []string {
 	var bwTestOn, cpsTestOn, ppsTestOn, latTestOn bool
 	var bw, cps, pps, latency uint64
-	aggTestResult, _ := gAggregateTestResults[proto]
+	aggTestResult := gAggregateTestResults[proto]
 	test, found := s.tests[EthrTestID{proto, All}]
 	if found && test.isActive {
 		bwTestOn = true
