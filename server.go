@@ -700,7 +700,7 @@ func srvrHandleNewTcpConn(conn net.Conn) {
 			ui.printDbg("Failed to create UDP test for control channel")
 			return
 		}
-		ui.printDbg("UDP control channel: got test (isNew=%v, isDormant=%v, sessionID=%s)", 
+		ui.printDbg("UDP control channel: got test (isNew=%v, isDormant=%v, sessionID=%s)",
 			isNewUDP, udpTest.isDormant, udpTest.sessionID)
 
 		// Update UDP test with actual test type and client parameters from handshake
@@ -713,7 +713,7 @@ func srvrHandleNewTcpConn(conn net.Conn) {
 		// TODO: For true per-client tracking, embed session ID in UDP packets
 
 		isCtrl, udpSessionID, err := trySyncStartWithClient(udpTest, conn)
-		ui.printDbg("UDP control channel: after trySyncStart (isCtrl=%v, isDormant=%v, err=%v)", 
+		ui.printDbg("UDP control channel: after trySyncStart (isCtrl=%v, isDormant=%v, err=%v)",
 			isCtrl, udpTest.isDormant, err)
 		if err != nil {
 			ui.printDbg("Failed to synchronize start time with UDP test client. Error: %v", err)

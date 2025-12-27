@@ -1,8 +1,8 @@
-//-----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Copyright (C) Microsoft. All rights reserved.
 // Licensed under the MIT license.
 // See LICENSE.txt file in the project root for full license information.
-//-----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 package main
 
 import (
@@ -56,13 +56,13 @@ const (
 	EthrInv EthrMsgType = iota
 	EthrSyn
 	EthrAck
-	EthrSyncStart  // Client sends sync request to server
-	EthrSyncReady  // Server sends timing info to client
-	EthrSyncGo     // Client sends RTT back, server uses it to sync
+	EthrSyncStart // Client sends sync request to server
+	EthrSyncReady // Server sends timing info to client
+	EthrSyncGo    // Client sends RTT back, server uses it to sync
 	// Control channel message types (iPerf-style)
-	EthrCtrlStart     // Control: Test is starting
-	EthrCtrlTestEnd   // Control: Test has ended, requesting results
-	EthrCtrlResults   // Control: Results from server
+	EthrCtrlStart   // Control: Test is starting
+	EthrCtrlTestEnd // Control: Test has ended, requesting results
+	EthrCtrlResults // Control: Results from server
 )
 
 type EthrMsgVer uint32
@@ -96,7 +96,7 @@ type EthrMsgSyncStart struct {
 
 type EthrMsgSyncReady struct {
 	DelayNs int64 // Nanoseconds until server's next stats interval (multi-client mode)
-	              // In single-client mode: 0 means "measure RTT and send back"
+	// In single-client mode: 0 means "measure RTT and send back"
 }
 
 type EthrMsgSyncGo struct {
@@ -105,8 +105,8 @@ type EthrMsgSyncGo struct {
 
 // Control channel message structures (iPerf-style)
 type EthrMsgCtrlStart struct {
-	SessionID string   // Unique session ID to associate data connections
-	UDPPorts  []int    // List of UDP source ports this client will use
+	SessionID string // Unique session ID to associate data connections
+	UDPPorts  []int  // List of UDP source ports this client will use
 }
 
 type EthrMsgCtrlTestEnd struct {
@@ -125,7 +125,7 @@ type ethrTestResult struct {
 	pps     uint64
 	latency uint64
 	// clatency uint64
-	
+
 	// Cumulative totals (not reset by stats timer)
 	totalBw  uint64 // Total bytes transferred
 	totalPps uint64 // Total packets
@@ -309,8 +309,8 @@ func createOrGetTest(remoteIP string, proto EthrProtocol, testType EthrTestType)
 		testID := EthrTestID{proto, testType}
 		test, _ = newTestInternal(remoteIP, testID, EthrClientParam{})
 		test.isActive = true
-		test.isDormant = true  // Start dormant; will be activated by EthrCtrlStart or first data packet
-		test.startTime = time.Now()  // Track when this test started
+		test.isDormant = true       // Start dormant; will be activated by EthrCtrlStart or first data packet
+		test.startTime = time.Now() // Track when this test started
 	}
 	atomic.AddInt32(&test.refCount, 1)
 	return
