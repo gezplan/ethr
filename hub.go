@@ -147,11 +147,12 @@ func parseDurationToTime(durationStr string) time.Duration {
 }
 
 // formatBufferSize formats a buffer size in bytes to a human-readable string
+// Uses SI units (1000) to be consistent with unitToNumber parsing
 func formatBufferSize(bytes uint32) string {
-	if bytes >= 1024*1024 {
-		return fmt.Sprintf("%dMB", bytes/(1024*1024))
-	} else if bytes >= 1024 {
-		return fmt.Sprintf("%dKB", bytes/1024)
+	if bytes >= 1000*1000 {
+		return fmt.Sprintf("%dMB", bytes/(1000*1000))
+	} else if bytes >= 1000 {
+		return fmt.Sprintf("%dKB", bytes/1000)
 	}
 	return fmt.Sprintf("%dB", bytes)
 }
