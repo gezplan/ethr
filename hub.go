@@ -1149,6 +1149,17 @@ func executeServerMode(serverURL string, sessionId string, cmd TestCommand, stop
 		Metadata:  map[string]interface{}{"status": "starting", "port": cmd.Port},
 	}, false)
 
+	// Set up callback for when server is ready and listening
+	hubServerReadyCallback = func(port int) {
+		sendResult(serverURL, sessionId, TestResult{
+			Timestamp: time.Now(),
+			Source:    "server",
+			Type:      "status",
+			Protocol:  cmd.Protocol,
+			Metadata:  map[string]interface{}{"status": "active", "port": port},
+		}, false)
+	}
+
 	// Set up callback for new client connections (control channel mode)
 	// This is called by server.go when a new control channel is established
 	hubNewClientCallback = func(remoteAddr string, proto EthrProtocol, testType EthrTestType, test *ethrTest) {
@@ -1298,6 +1309,7 @@ func executeServerMode(serverURL string, sessionId string, cmd TestCommand, stop
 		hubStatsCallback = nil
 		hubPingCallback = nil
 		hubNewClientCallback = nil
+		hubServerReadyCallback = nil
 		if err != nil {
 			// Server failed to start or encountered an error
 			ui.printMsg("Server failed: %v", err)
@@ -1353,6 +1365,7 @@ func executeServerMode(serverURL string, sessionId string, cmd TestCommand, stop
 		hubStatsCallback = nil
 		hubPingCallback = nil
 		hubNewClientCallback = nil
+		hubServerReadyCallback = nil
 
 		if graceful {
 			sendResult(serverURL, sessionId, TestResult{
@@ -1360,7 +1373,7 @@ func executeServerMode(serverURL string, sessionId string, cmd TestCommand, stop
 				Source:    "server",
 				Type:      "status",
 				Protocol:  cmd.Protocol,
-				Metadata:  map[string]interface{}{"status": "completed"},
+				Metadata:  map[string]interface{}{"status": "stopped"},
 			}, true)
 			updateSessionStatus(serverURL, sessionId, "Completed", "")
 		} else {

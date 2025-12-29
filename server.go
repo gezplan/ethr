@@ -206,6 +206,11 @@ func runServer(serverParam ethrServerParam) error {
 		return fmt.Errorf("UDP server error: %w", err)
 	}
 
+	// Notify hub that server is ready and listening
+	if hubServerReadyCallback != nil {
+		hubServerReadyCallback(int(gEthrPort))
+	}
+
 	// Start TCP server in goroutine so we can monitor for cancellation
 	tcpErrChan := make(chan error, 1)
 	go func() {

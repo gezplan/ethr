@@ -168,6 +168,9 @@ var hubPingCallback func(localAddr, remoteAddr string, proto EthrProtocol, laten
 // Called when a new client connects with a control channel, before any stats are sent
 var hubNewClientCallback func(remoteAddr string, proto EthrProtocol, testType EthrTestType, test *ethrTest)
 
+// Callback for when server is ready and listening for connections
+var hubServerReadyCallback func(port int)
+
 // Active test for hub mode - used by emitLatencyResults to find the test
 // when the test lookup by session fails (e.g., external mode)
 var hubActiveTest *ethrTest
