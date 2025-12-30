@@ -2029,12 +2029,14 @@ func executeExternalMode(serverURL string, sessionId string, cmd TestCommand, st
 	}
 
 	// Build client parameters
+	// For external mode, always use NoControlChannel since there's no ethr server
 	clientParam := EthrClientParam{
-		NumThreads:  uint32(cmd.Threads),
-		Duration:    parseDurationToTime(cmd.Duration),
-		Gap:         gap,
-		WarmupCount: warmupCount,
-		ToS:         uint8(cmd.Tos),
+		NumThreads:       uint32(cmd.Threads),
+		Duration:         parseDurationToTime(cmd.Duration),
+		Gap:              gap,
+		WarmupCount:      warmupCount,
+		ToS:              uint8(cmd.Tos),
+		NoControlChannel: true, // External mode doesn't have an ethr server to coordinate with
 	}
 
 	// Build test parameters for display
@@ -2112,7 +2114,7 @@ func executeExternalMode(serverURL string, sessionId string, cmd TestCommand, st
 		// Set hubActiveTest for direct callback access in emitLatencyResults
 		hubActiveTest = test
 
-		// Set up stats callback for external tests (ping, traceroute, mytraceroute)
+		// Set up stats callback for external tests (ping, traceroute, mytraceroute, cps)
 		var intervalCounter int = 1
 		hubStatsCallback = func(remoteAddr string, proto EthrProtocol, testTypeCallback EthrTestType,
 			bw, cps, pps uint64, latencyStats *LatencyStats, hops []ethrHopData, test *ethrTest) {
@@ -2128,6 +2130,18 @@ func executeExternalMode(serverURL string, sessionId string, cmd TestCommand, st
 
 			// Handle different external test types
 			switch testTypeCallback {
+			case Cps:
+				// Connections per second test
+				if cps > 0 {
+					result.Type = "interval"
+					cpsInt := int64(cps)
+					result.ConnectionsPerSec = &cpsInt
+					result.TestParams = testParams
+					result.Metadata = map[string]interface{}{
+						"interval": intervalCounter,
+					}
+				}
+
 			case Ping:
 				if latencyStats != nil {
 					avgMs := float64(latencyStats.Avg.Microseconds()) / 1000.0
