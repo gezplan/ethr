@@ -1078,12 +1078,12 @@ func printConnectionLatencyResults(server string, test *ethrTest, sent, rcvd, lo
 	fmt.Println("-----------------------------------------------------------------------------------------")
 	ui.printMsg("TCP connect statistics for %s:", server)
 	ui.printMsg("  Sent = %d, Received = %d, Lost = %d", sent, rcvd, lost)
-	
+
 	// Send ping summary to hub callback (includes latency numbers for stats)
 	if hubPingSummaryCallback != nil && hubActiveTest != nil {
 		hubPingSummaryCallback(sent, rcvd, lost, latencyNumbers, hubActiveTest)
 	}
-	
+
 	if rcvd > 0 {
 		ui.emitLatencyHdr()
 		calcAndPrintLatency(test, rcvd, latencyNumbers)

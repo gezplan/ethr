@@ -1934,20 +1934,20 @@ func executeClientMode(serverURL string, sessionId string, cmd TestCommand, stop
 				sort.SliceStable(latencyNumbers, func(i, j int) bool {
 					return latencyNumbers[i] < latencyNumbers[j]
 				})
-				
+
 				sum := int64(0)
 				for _, d := range latencyNumbers {
 					sum += d.Nanoseconds()
 				}
-				
+
 				avgMs := float64(sum/int64(len(latencyNumbers))) / 1e6
 				minMs := float64(latencyNumbers[0].Nanoseconds()) / 1e6
 				maxMs := float64(latencyNumbers[len(latencyNumbers)-1].Nanoseconds()) / 1e6
-				
+
 				result.LatencyAvg = &avgMs
 				result.LatencyMin = &minMs
 				result.LatencyMax = &maxMs
-				
+
 				// Calculate percentiles
 				count := len(latencyNumbers)
 				if count >= 2 {
@@ -2336,20 +2336,20 @@ func executeExternalMode(serverURL string, sessionId string, cmd TestCommand, st
 				sort.SliceStable(latencyNumbers, func(i, j int) bool {
 					return latencyNumbers[i] < latencyNumbers[j]
 				})
-				
+
 				sum := int64(0)
 				for _, d := range latencyNumbers {
 					sum += d.Nanoseconds()
 				}
-				
+
 				avgMs := float64(sum/int64(len(latencyNumbers))) / 1e6
 				minMs := float64(latencyNumbers[0].Nanoseconds()) / 1e6
 				maxMs := float64(latencyNumbers[len(latencyNumbers)-1].Nanoseconds()) / 1e6
-				
+
 				result.LatencyAvg = &avgMs
 				result.LatencyMin = &minMs
 				result.LatencyMax = &maxMs
-				
+
 				// Calculate percentiles
 				count := len(latencyNumbers)
 				if count >= 2 {
