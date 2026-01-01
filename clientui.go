@@ -86,9 +86,10 @@ func (u *clientUI) emitLatencyResults(remote, proto string, avg, min, max, p50, 
 		// First, try to use hubActiveTest if available (external mode)
 		if hubActiveTest != nil {
 			protoEnum := TCP
-			if proto == "udp" {
+			switch proto {
+			case "udp":
 				protoEnum = UDP
-			} else if proto == "icmp" {
+			case "icmp":
 				protoEnum = ICMP
 			}
 			testType := hubActiveTest.testID.Type
@@ -119,9 +120,10 @@ func (u *clientUI) emitLatencyResults(remote, proto string, avg, min, max, p50, 
 
 		if targetTest != nil {
 			protoEnum := TCP
-			if proto == "udp" {
+			switch proto {
+			case "udp":
 				protoEnum = UDP
-			} else if proto == "icmp" {
+			case "icmp":
 				protoEnum = ICMP
 			}
 			hubStatsCallback(remote, protoEnum, testType, 0, 0, 0, latencyStats, nil, targetTest)
@@ -147,17 +149,19 @@ var gInterval uint64
 var gNoConnectionStats bool
 
 func printBwTestDivider(p EthrProtocol) {
-	if p == TCP {
+	switch p {
+	case TCP:
 		ui.printMsg("- - - - - - - - - - - - - - - - - - - - - - -")
-	} else if p == UDP {
+	case UDP:
 		ui.printMsg("- - - - - - - - - - - - - - - - - - - - - - - - - - - -")
 	}
 }
 
 func printBwTestHeader(p EthrProtocol) {
-	if p == TCP {
+	switch p {
+	case TCP:
 		ui.printMsg("[  ID ]   Protocol    Interval      Bits/s")
-	} else if p == UDP {
+	case UDP:
 		// Printing packets only makes sense for UDP as it is a datagram protocol.
 		// For TCP, TCP itself decides how to chunk the stream to send as packets.
 		ui.printMsg("[  ID ]   Protocol    Interval      Bits/s    Pkts/s")
@@ -165,10 +169,11 @@ func printBwTestHeader(p EthrProtocol) {
 }
 
 func printBwTestResult(p EthrProtocol, fd string, t0, t1, bw, pps uint64) {
-	if p == TCP {
+	switch p {
+	case TCP:
 		ui.printMsg("[%5s]     %-5s    %03d-%03d sec   %7s", fd,
 			protoToString(p), t0, t1, bytesToRate(bw))
-	} else if p == UDP {
+	case UDP:
 		ui.printMsg("[%5s]     %-5s    %03d-%03d sec   %7s   %7s", fd,
 			protoToString(p), t0, t1, bytesToRate(bw), ppsToString(pps))
 	}

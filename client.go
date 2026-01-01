@@ -105,9 +105,10 @@ func getServerIPandPort(server string) (string, string, string, error) {
 		} else {
 			// Only implicitly derive port in External client mode.
 			if gIsExternalClient {
-				if u.Scheme == "http" {
+				switch u.Scheme {
+				case "http":
 					port = "80"
-				} else if u.Scheme == "https" {
+				case "https":
 					port = "443"
 				}
 			}
@@ -179,8 +180,10 @@ func runTest(test *ethrTest) {
 	atomic.StoreUint64(&test.testResult.totalBw, 0)
 	atomic.StoreUint64(&test.testResult.totalPps, 0)
 
-	if test.testID.Protocol == TCP {
-		if test.testID.Type == Bandwidth {
+	switch test.testID.Protocol {
+	case TCP:
+		switch test.testID.Type {
+		case Bandwidth:
 			if test.clientParam.NoControlChannel {
 				// No control channel mode (-ncc): use in-band sync on data connections
 				// This is useful when server is behind a load balancer
@@ -190,11 +193,11 @@ func runTest(test *ethrTest) {
 				// coordination and results exchange (iPerf-style)
 				tcpRunBandwidthTestWithCtrl(test, toStop, duration)
 			}
-		} else if test.testID.Type == Latency {
+		case Latency:
 			startStatsTimer()
 			runDurationTimer(duration, toStop)
 			go runTCPLatencyTest(test, gap, toStop)
-		} else if test.testID.Type == Cps {
+		case Cps:
 			if test.clientParam.NoControlChannel {
 				// No control channel mode: pure connection establishment test
 				startStatsTimer()
@@ -204,24 +207,24 @@ func runTest(test *ethrTest) {
 				// Control channel mode: deterministic test end with results exchange
 				tcpRunCpsTestWithCtrl(test, toStop, duration)
 			}
-		} else if test.testID.Type == Ping {
+		case Ping:
 			startStatsTimer()
 			runDurationTimer(duration, toStop)
 			go clientRunPingTest(test, gap, test.clientParam.WarmupCount)
-		} else if test.testID.Type == TraceRoute {
+		case TraceRoute:
 			VerifyPermissionForTest(test.testID)
 			startStatsTimer()
 			runDurationTimer(duration, toStop)
 			go tcpRunTraceRoute(test, gap, toStop)
-		} else if test.testID.Type == MyTraceRoute {
+		case MyTraceRoute:
 			VerifyPermissionForTest(test.testID)
 			startStatsTimer()
 			runDurationTimer(duration, toStop)
 			go tcpRunMyTraceRoute(test, gap, toStop)
 		}
-	} else if test.testID.Protocol == UDP {
-		if test.testID.Type == Bandwidth ||
-			test.testID.Type == Pps {
+	case UDP:
+		switch test.testID.Type {
+		case Bandwidth, Pps:
 			if test.clientParam.NoControlChannel {
 				// No control channel mode (-ncc)
 				startStatsTimer()
@@ -232,17 +235,18 @@ func runTest(test *ethrTest) {
 				runUDPBandwidthAndPpsTestWithCtrl(test, toStop, duration)
 			}
 		}
-	} else if test.testID.Protocol == ICMP {
+	case ICMP:
 		VerifyPermissionForTest(test.testID)
-		if test.testID.Type == Ping {
+		switch test.testID.Type {
+		case Ping:
 			startStatsTimer()
 			runDurationTimer(duration, toStop)
 			go clientRunPingTest(test, gap, test.clientParam.WarmupCount)
-		} else if test.testID.Type == TraceRoute {
+		case TraceRoute:
 			startStatsTimer()
 			runDurationTimer(duration, toStop)
 			go icmpRunTraceRoute(test, gap, toStop)
-		} else if test.testID.Type == MyTraceRoute {
+		case MyTraceRoute:
 			startStatsTimer()
 			runDurationTimer(duration, toStop)
 			go icmpRunMyTraceRoute(test, gap, toStop)
@@ -1434,30 +1438,28 @@ func icmpProbe(test *ethrTest, dstIPAddr net.IPAddr, icmpTimeout time.Duration, 
 }
 
 func icmpSetTTL(c net.PacketConn, ttl int) error {
-	err := os.ErrInvalid
-	if gIPVersion == ethrIPv4 {
-		cIPv4 := ipv4.NewPacketConn(c)
-		err = cIPv4.SetTTL(ttl)
-	} else if gIPVersion == ethrIPv6 {
-		cIPv6 := ipv6.NewPacketConn(c)
-		err = cIPv6.SetHopLimit(ttl)
+	switch gIPVersion {
+	case ethrIPv4:
+		return ipv4.NewPacketConn(c).SetTTL(ttl)
+	case ethrIPv6:
+		return ipv6.NewPacketConn(c).SetHopLimit(ttl)
+	default:
+		return os.ErrInvalid
 	}
-	return err
 }
 
 func icmpSetTOS(c net.PacketConn, tos int) error {
 	if tos == 0 {
 		return nil
 	}
-	err := os.ErrInvalid
-	if gIPVersion == ethrIPv4 {
-		cIPv4 := ipv4.NewPacketConn(c)
-		err = cIPv4.SetTOS(tos)
-	} else if gIPVersion == ethrIPv6 {
-		cIPv6 := ipv6.NewPacketConn(c)
-		err = cIPv6.SetTrafficClass(tos)
+	switch gIPVersion {
+	case ethrIPv4:
+		return ipv4.NewPacketConn(c).SetTOS(tos)
+	case ethrIPv6:
+		return ipv6.NewPacketConn(c).SetTrafficClass(tos)
+	default:
+		return os.ErrInvalid
 	}
-	return err
 }
 
 func icmpSendMsg(c net.PacketConn, dstIPAddr net.IPAddr, hop, seq int, body string, timeout time.Duration) (time.Time, []byte, error) {

@@ -166,11 +166,14 @@ func finiServer() {
 }
 
 func showAcceptedIPVersion() {
-	var ipVerString = "ipv4, ipv6"
-	if gIPVersion == ethrIPv4 {
+	var ipVerString string
+	switch gIPVersion {
+	case ethrIPv4:
 		ipVerString = "ipv4"
-	} else if gIPVersion == ethrIPv6 {
+	case ethrIPv6:
 		ipVerString = "ipv6"
+	default:
+		ipVerString = "ipv4, ipv6"
 	}
 	ui.printMsg("Accepting IP version: %s", ipVerString)
 }
@@ -235,7 +238,7 @@ func runServer(serverParam ethrServerParam) error {
 	}
 }
 
-func handshakeWithClient(test *ethrTest, conn net.Conn) (testID EthrTestID, clientParam EthrClientParam, sessionID string, err error) {
+func handshakeWithClient(_ *ethrTest, conn net.Conn) (testID EthrTestID, clientParam EthrClientParam, sessionID string, err error) {
 	ethrMsg := recvSessionMsg(conn)
 	if ethrMsg.Type != EthrSyn {
 		// No SYN received - likely a CPS test where client just connects/disconnects
@@ -594,8 +597,10 @@ func srvrHandleNewTcpConn(conn net.Conn) {
 	}
 
 	isCPSorPing = false
-	if testID.Protocol == TCP {
-		if testID.Type == Bandwidth {
+	switch testID.Protocol {
+	case TCP:
+		switch testID.Type {
+		case Bandwidth:
 			// For bandwidth tests, try to do synchronization
 			// Control connections send CtrlStart, in-band sync sends SyncStart, data connections send neither
 			isCtrl, ctrlSessionID, err := trySyncStartWithClient(test, conn)
@@ -620,7 +625,7 @@ func srvrHandleNewTcpConn(conn net.Conn) {
 			// This is a data connection (or in-band sync first connection) - run bandwidth test
 			// If sessionID is provided, accumulate stats to session for multi-client support
 			srvrRunTCPBandwidthTestWithSession(test, clientParam, conn, sessionID)
-		} else if testID.Type == Cps {
+		case Cps:
 			// For CPS tests, check if this is a control channel
 			isCtrl, ctrlSessionID, err := trySyncStartWithClient(test, conn)
 			if err != nil {
@@ -640,11 +645,11 @@ func srvrHandleNewTcpConn(conn net.Conn) {
 			}
 			// This shouldn't happen for CPS tests - connections without handshake are handled earlier
 			ui.printDbg("Unexpected: CPS test with handshake but no control channel")
-		} else if testID.Type == Latency {
+		case Latency:
 			ui.emitLatencyHdr()
 			srvrRunTCPLatencyTest(test, clientParam, conn)
 		}
-	} else if testID.Protocol == UDP {
+	case UDP:
 		// This is a TCP control channel for UDP tests
 		// UDP tests benefit greatly from control channel to report received bandwidth/PPS
 		isCPSorPing = true // Use delayed deletion since UDP data comes separately
@@ -834,7 +839,7 @@ func srvrRunTCPLatencyTest(test *ethrTest, clientParam EthrClientParam, conn net
 func srvrRunUDPServer() error {
 	// Use ListenConfig to set SO_REUSEADDR for faster port reuse after close
 	lc := net.ListenConfig{
-		Control: func(network, address string, c syscall.RawConn) error {
+		Control: func(_, _ string, c syscall.RawConn) error {
 			var opErr error
 			err := c.Control(func(fd uintptr) {
 				// Set SO_REUSEADDR to allow binding to a port in TIME_WAIT state

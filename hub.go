@@ -847,13 +847,16 @@ func performDeviceAuthAttempt(serverURL string) error {
 		_ = json.NewDecoder(resp.Body).Decode(&tokenResp)
 		resp.Body.Close()
 
-		if tokenResp.Error == "authorization_pending" {
+		switch tokenResp.Error {
+		case "authorization_pending":
 			continue
-		} else if tokenResp.Error == "slow_down" {
+		case "slow_down":
 			interval = interval + (5 * time.Second)
 			ui.printDbg("Slowing down polling interval to %v", interval)
 			continue
-		} else if tokenResp.Error != "" {
+		case "":
+			// Success - fall through to save tokens
+		default:
 			return fmt.Errorf("token request failed: %s", tokenResp.Error)
 		}
 
@@ -1173,13 +1176,14 @@ func commandLoop(serverURL string) {
 
 		if cmdResp.HasCommand {
 			// Check if this is a stop command
-			if cmdResp.Command.Mode == "stop" {
+			switch cmdResp.Command.Mode {
+			case "stop":
 				ui.printDbg("Received stop command for session: %s", cmdResp.SessionId)
 				stopTest(cmdResp.SessionId, false)
-			} else if cmdResp.Command.Mode == "complete" {
+			case "complete":
 				ui.printDbg("Received complete command for session: %s", cmdResp.SessionId)
 				stopTest(cmdResp.SessionId, true) // graceful completion
-			} else {
+			default:
 				ui.printMsg("Received command for session: %s", cmdResp.SessionId)
 				go executeCommand(serverURL, cmdResp.SessionId, cmdResp.Command)
 			}
@@ -1226,13 +1230,14 @@ func executeCommand(serverURL string, sessionId string, cmd TestCommand) {
 
 	// Execute the test based on mode
 	// Note: Each mode function is responsible for cleaning up the runningTests map
-	if cmd.Mode == "server" {
+	switch cmd.Mode {
+	case "server":
 		executeServerMode(serverURL, sessionId, cmd, stopChan)
-	} else if cmd.Mode == "client" {
+	case "client":
 		executeClientMode(serverURL, sessionId, cmd, stopChan)
-	} else if cmd.Mode == "external" {
+	case "external":
 		executeExternalMode(serverURL, sessionId, cmd, stopChan)
-	} else {
+	default:
 		updateSessionStatus(serverURL, sessionId, "Failed", "Invalid mode: "+cmd.Mode)
 		// Clean up for invalid mode
 		runningTests.Lock()
@@ -1515,9 +1520,10 @@ func executeServerMode(serverURL string, sessionId string, cmd TestCommand, stop
 // Helper function to build test parameters for display
 func buildTestParams(cmd TestCommand, protocol EthrProtocol, testType EthrTestType) *TestParameters {
 	protoStr := "tcp"
-	if protocol == UDP {
+	switch protocol {
+	case UDP:
 		protoStr = "udp"
-	} else if protocol == ICMP {
+	case ICMP:
 		protoStr = "icmp"
 	}
 

@@ -316,9 +316,10 @@ func ethrSetTTL(fd uintptr, ttl int) {
 	if ttl == 0 {
 		return
 	}
-	if gIPVersion == ethrIPv4 {
+	switch gIPVersion {
+	case ethrIPv4:
 		_ = setSockOptInt(fd, syscall.IPPROTO_IP, syscall.IP_TTL, ttl)
-	} else {
+	default:
 		_ = setSockOptInt(fd, syscall.IPPROTO_IPV6, syscall.IPV6_UNICAST_HOPS, ttl)
 	}
 }
@@ -327,9 +328,10 @@ func ethrSetTOS(fd uintptr, tos int) {
 	if tos == 0 {
 		return
 	}
-	if gIPVersion == ethrIPv4 {
+	switch gIPVersion {
+	case ethrIPv4:
 		_ = setSockOptInt(fd, syscall.IPPROTO_IP, syscall.IP_TOS, tos)
-	} else {
+	default:
 		SetTClass(fd, tos)
 	}
 }
@@ -354,12 +356,13 @@ func ethrDialEx(p EthrProtocol, dialAddr, localIP string, localPortNum uint16, t
 	localAddr := fmt.Sprintf("%v:%v", localIP, localPortNum)
 	var la net.Addr
 	network := Tcp()
-	if p == TCP {
+	switch p {
+	case TCP:
 		la, err = net.ResolveTCPAddr(network, localAddr)
-	} else if p == UDP {
+	case UDP:
 		network = Udp()
 		la, err = net.ResolveUDPAddr(network, localAddr)
-	} else {
+	default:
 		ui.printDbg("Only TCP or UDP are allowed in ethrDial")
 		err = os.ErrInvalid
 		return
