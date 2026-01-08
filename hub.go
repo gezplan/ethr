@@ -27,6 +27,7 @@ import (
 type HubConfig struct {
 	ServerURL string
 	Title     string
+	Logout    bool // Clear saved credentials and re-authenticate
 }
 
 type HubAuth struct {
@@ -66,6 +67,14 @@ type AgentRegistrationRequest struct {
 type AgentRegistrationResponse struct {
 	AgentId      string `json:"agentId"`
 	PollInterval int    `json:"pollInterval"`
+}
+
+type UserInfoResponse struct {
+	Id                string `json:"id"`
+	Email             string `json:"email"`
+	Name              string `json:"name"`
+	ProfilePictureUrl string `json:"profilePictureUrl,omitempty"`
+	Provider          string `json:"provider"`
 }
 
 type CommandResponse struct {
@@ -263,6 +272,7 @@ var hubAgentId string
 var hubAgentTitle string
 var hubAgentTitleUserSupplied bool
 var hubHttpClient *http.Client
+var hubUserInfo *UserInfoResponse // Current logged-in user info
 
 // Track running tests for stopping
 var runningTests = struct {
@@ -530,8 +540,7 @@ func handleReauthentication(serverURL string) error {
 }
 
 func runHubAgent(config HubConfig) {
-	ui.printMsg("Starting hub integration mode...")
-	ui.printMsg("Hub server: %s", config.ServerURL)
+	ui.printMsg("Connecting to hub: %s", config.ServerURL)
 
 	// Initialize HTTP client with TLS
 	hubHttpClient = &http.Client{
@@ -544,7 +553,13 @@ func runHubAgent(config HubConfig) {
 	// Initialize auth
 	hubAuth = &HubAuth{}
 
-	// Show information about saved credentials
+	// Handle logout flag - clear saved credentials and force re-authentication
+	if config.Logout {
+		ui.printMsg("Switching user...")
+		clearTokens(config.ServerURL)
+	}
+
+	// Show information about saved credentials (debug only)
 	savedHubs, _ := listSavedHubs()
 	if len(savedHubs) > 0 {
 		ui.printDbg("Found saved credentials for %d hub(s)", len(savedHubs))
@@ -560,7 +575,7 @@ func runHubAgent(config HubConfig) {
 	// Try to load saved tokens first
 	_, loadedRefreshToken, expiresAt, err := loadTokens(config.ServerURL)
 	if err == nil && loadedRefreshToken != "" {
-		ui.printMsg("Found saved credentials for this hub, attempting automatic login...")
+		ui.printDbg("Found saved credentials, validating...")
 		ui.printDbg("Loaded token expires at: %v (in %v)", expiresAt, time.Until(expiresAt))
 
 		// Try to refresh the token (validates with server and gets fresh tokens)
@@ -621,10 +636,11 @@ func runHubAgent(config HubConfig) {
 
 		// Save tokens after successful auth
 		_ = saveTokens(config.ServerURL, hubAuth.AccessToken, hubAuth.RefreshToken, 3600)
-		ui.printMsg("Credentials saved for future use")
+		ui.printDbg("Credentials saved for future use")
 	}
 
-	ui.printMsg("Authentication successful!")
+	// Fetch and store user info globally
+	hubUserInfo, _ = fetchUserInfo(config.ServerURL)
 
 	// Register agent with hub
 	err = registerAgent(config.ServerURL, config.Title)
@@ -672,7 +688,7 @@ func runHubAgent(config HubConfig) {
 		}
 	}
 
-	ui.printMsg("Agent registered successfully (ID: %s)", hubAgentId)
+	ui.printMsg("Agent ready and listening for commands...")
 
 	// Set up signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
@@ -689,7 +705,7 @@ func runHubAgent(config HubConfig) {
 
 	// Wait for interrupt signal
 	<-sigChan
-	ui.printMsg("\nReceived interrupt signal, shutting down gracefully...")
+	ui.printMsg("\nShutting down...")
 
 	// Clean up and exit
 	os.Exit(0)
@@ -914,6 +930,54 @@ func generateFriendlyTitle() string {
 	return fmt.Sprintf("%s%s", words1[idx1], words2[idx2])
 }
 
+// printSessionInfoBox prints a nice info box with session details
+func printSessionInfoBox(serverURL string, title string, titleIsUserSupplied bool) {
+	// ANSI color codes
+	gray := "\x1b[90m"
+	darkYellow := "\x1b[33m"
+	white := "\x1b[97m"
+	green := "\x1b[32m"
+	reset := "\x1b[0m"
+
+	// Box drawing
+	fmt.Println()
+	fmt.Printf("%s╔══════════════════════════════════════════════════════════════════════╗%s\n", gray, reset)
+
+	// Hub server
+	fmt.Printf("%s║%s  Hub:    %s%-60s%s║%s\n", gray, reset, white, truncateString(serverURL, 60), gray, reset)
+
+	// User info
+	if hubUserInfo != nil {
+		userName := hubUserInfo.Email
+		if hubUserInfo.Name != "" {
+			userName = fmt.Sprintf("%s (%s)", hubUserInfo.Name, hubUserInfo.Email)
+		}
+		fmt.Printf("%s║%s  User:   %s%-60s%s║%s\n", gray, reset, white, truncateString(userName, 60), gray, reset)
+	}
+
+	// Session title
+	fmt.Printf("%s║%s  Title:  %s%-60s%s║%s\n", gray, reset, green, truncateString(title, 60), gray, reset)
+
+	// Separator and tips
+	fmt.Printf("%s╟──────────────────────────────────────────────────────────────────────╢%s\n", gray, reset)
+
+	if !titleIsUserSupplied {
+		fmt.Printf("%s║%s  %sTip: Customize title with -T \"my-agent\"%s                             %s║%s\n", gray, reset, darkYellow, reset, gray, reset)
+	}
+	fmt.Printf("%s║%s  %sTip: Switch user with -logout%s                                       %s║%s\n", gray, reset, darkYellow, reset, gray, reset)
+
+	fmt.Printf("%s╚══════════════════════════════════════════════════════════════════════╝%s\n", gray, reset)
+	fmt.Println()
+}
+
+// truncateString truncates a string to maxLen characters
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
+}
+
 func registerAgent(serverURL string, title string) error {
 	hostname, _ := os.Hostname()
 
@@ -948,14 +1012,9 @@ func registerAgent(serverURL string, title string) error {
 		Capabilities:        []string{"bandwidth", "latency", "cps", "pps"},
 	}
 
-	// Print session title in a box (only on initial registration)
+	// Print session info box (only on initial registration)
 	if !isReRegistration {
-		ui.printMsg("╔═══════════════════════════════════════════════════════════════╗")
-		ui.printMsg("║  Session Title: %-46s║", title)
-		ui.printMsg("╚═══════════════════════════════════════════════════════════════╝")
-		if !titleIsUserSupplied {
-			ui.printMsg("Customize session title with -T flag")
-		}
+		printSessionInfoBox(serverURL, title, titleIsUserSupplied)
 	}
 
 	reqBody, _ := json.Marshal(req)
@@ -1002,6 +1061,36 @@ func registerAgent(serverURL string, title string) error {
 
 	hubAgentId = regResp.AgentId
 	return nil
+}
+
+// fetchUserInfo retrieves the current user's information from the hub
+func fetchUserInfo(serverURL string) (*UserInfoResponse, error) {
+	hubAuth.mu.RLock()
+	accessToken := hubAuth.AccessToken
+	hubAuth.mu.RUnlock()
+
+	req, err := http.NewRequest("GET", serverURL+"/api/user/me", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+
+	resp, err := hubHttpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to fetch user info (HTTP %d)", resp.StatusCode)
+	}
+
+	var userInfo UserInfoResponse
+	if err := json.NewDecoder(resp.Body).Decode(&userInfo); err != nil {
+		return nil, err
+	}
+
+	return &userInfo, nil
 }
 
 func tokenRefreshLoop(serverURL string) {

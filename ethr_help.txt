@@ -215,3 +215,7 @@ analysis. This enables centralized control and monitoring of performance tests.
 		Hub is specified as a URL (e.g., http://hub.example.com:5284).
 		Uses OAuth 2.0 device authentication flow for secure access.
 		Example: -hub "http://localhost:5284"
+	-logout
+		Clear saved credentials and re-authenticate with a different account.
+		Use this to switch users or fix authentication issues.
+		Example: -hub "http://localhost:5284" -logout

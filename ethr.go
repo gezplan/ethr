@@ -32,10 +32,8 @@ func main() {
 		gVersion = "UNKNOWN"
 	}
 
-	fmt.Println("\nEthr: Comprehensive Network Performance Measurement Tool")
-	fmt.Println("Built by EthrHub team | Based on original Ethr by Microsoft")
-	fmt.Println("Support & Issues: https://github.com/ethrhub/ethr/issues")
-	fmt.Println("")
+	// Print startup banner (will be enhanced by hub mode with session info)
+	printStartupBanner()
 
 	//
 	// Set GOMAXPROCS to 1024 as running large number of goroutines that send
@@ -79,6 +77,7 @@ func main() {
 	ncc := flag.Bool("ncc", false, "")
 	// Hub integration mode
 	hubURL := flag.String("hub", "", "")
+	hubLogout := flag.Bool("logout", false, "")
 
 	flag.Parse()
 
@@ -207,6 +206,7 @@ func main() {
 		hubConfig := HubConfig{
 			ServerURL: *hubURL,
 			Title:     *title,
+			Logout:    *hubLogout,
 		}
 		runHubAgent(hubConfig)
 	} else {
@@ -404,6 +404,19 @@ func printUsageError(s string) {
 	fmt.Printf("Error: %s\n", s)
 	fmt.Printf("Please use \"ethr -h\" for complete list of command line arguments.\n")
 	os.Exit(1)
+}
+
+// printStartupBanner prints the initial startup banner
+func printStartupBanner() {
+	gray := "\x1b[90m"
+	white := "\x1b[97m"
+	reset := "\x1b[0m"
+
+	fmt.Println()
+	fmt.Printf("%sEthr: Comprehensive Network Performance Measurement Tool%s\n", white, reset)
+	fmt.Printf("%sBuilt by EthrHub team | Based on original Ethr by Microsoft%s\n", gray, reset)
+	fmt.Printf("%sSupport & Issues: https://github.com/ethrhub/ethr/issues%s\n", gray, reset)
+	fmt.Println()
 }
 
 // ethrUsage prints the command-line usage text
@@ -648,4 +661,7 @@ func printHubUsage() {
 		"Hub is specified as a URL (e.g., http://hub.example.com:5284).",
 		"Uses OAuth 2.0 device authentication flow for secure access.",
 		"Example: -hub \"http://localhost:5284\"")
+	printFlagUsage("logout", "", "Clear saved credentials and re-authenticate with a different account.",
+		"Use this to switch users or fix authentication issues.",
+		"Example: -hub \"http://localhost:5284\" -logout")
 }
