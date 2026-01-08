@@ -87,6 +87,114 @@ update_latest_tag() {
     echo "  https://github.com/$(git remote get-url origin | sed -E 's|.*github.com[:/]||' | sed 's|.git$||')/releases/latest"
 }
 
+# Function to update latest release (tag + GitHub release with binaries)
+update_latest_release() {
+    local target_version=$1
+    
+    # Add 'v' prefix if not present
+    if [[ ! "$target_version" =~ ^v ]]; then
+        target_version="v${target_version}"
+    fi
+    
+    # Check if gh CLI is available
+    if ! command -v gh &> /dev/null; then
+        echo -e "${RED}Error: GitHub CLI (gh) is not installed${NC}"
+        echo "Install it from: https://cli.github.com/"
+        echo ""
+        echo "Alternatively, you can update the latest release via GitHub Actions:"
+        echo "  1. Go to your repo → Actions → 'Set Latest Release'"
+        echo "  2. Click 'Run workflow' and enter version: ${target_version}"
+        return 1
+    fi
+    
+    # Check if logged in to gh
+    if ! gh auth status &> /dev/null; then
+        echo -e "${RED}Error: Not logged in to GitHub CLI${NC}"
+        echo "Run: gh auth login"
+        return 1
+    fi
+    
+    # Check if the target version tag exists
+    if ! git rev-parse "$target_version" >/dev/null 2>&1; then
+        echo -e "${RED}Error: Tag ${target_version} does not exist${NC}"
+        return 1
+    fi
+    
+    # Check if a release exists for this tag
+    if ! gh release view "$target_version" &> /dev/null; then
+        echo -e "${RED}Error: No GitHub release found for ${target_version}${NC}"
+        echo "The release may not have been created yet, or the build may have failed."
+        return 1
+    fi
+    
+    echo -e "${GREEN}Updating 'latest' release to ${target_version}...${NC}"
+    echo ""
+    
+    # Create temp directory for assets
+    local tmp_dir=$(mktemp -d)
+    trap "rm -rf $tmp_dir" EXIT
+    
+    # Download assets from target release
+    echo "Downloading release assets from ${target_version}..."
+    if ! gh release download "$target_version" --dir "$tmp_dir" 2>/dev/null; then
+        echo -e "${YELLOW}Warning: Could not download assets (release may have no files yet)${NC}"
+    fi
+    
+    # Update git tag first
+    echo "Updating git tag..."
+    git tag -d latest 2>/dev/null || true
+    git push origin :refs/tags/latest 2>/dev/null || true
+    git tag latest "$target_version"
+    git push origin latest
+    
+    # Delete existing 'latest' release if it exists
+    echo "Removing existing 'latest' release..."
+    gh release delete latest --yes 2>/dev/null || true
+    
+    # Get the commit SHA for the version tag
+    local target_sha=$(git rev-parse "${target_version}^{}")
+    
+    # Create new 'latest' release
+    echo "Creating new 'latest' release..."
+    local asset_args=""
+    if [ -n "$(ls -A $tmp_dir 2>/dev/null)" ]; then
+        asset_args="$tmp_dir/*"
+    fi
+    
+    if [ -n "$asset_args" ]; then
+        gh release create latest \
+            --title "Latest Release ($target_version)" \
+            --notes "This release always points to the latest stable version.
+
+**Current Version:** $target_version
+
+See the [versioned release](https://github.com/$(git remote get-url origin | sed -E 's|.*github.com[:/]||' | sed 's|.git$||')/releases/tag/$target_version) for full release notes.
+
+---
+*Updated via release.sh on $(date -u '+%Y-%m-%d %H:%M UTC')*" \
+            --target "$target_sha" \
+            $tmp_dir/*
+    else
+        gh release create latest \
+            --title "Latest Release ($target_version)" \
+            --notes "This release always points to the latest stable version.
+
+**Current Version:** $target_version
+
+See the [versioned release](https://github.com/$(git remote get-url origin | sed -E 's|.*github.com[:/]||' | sed 's|.git$||')/releases/tag/$target_version) for full release notes.
+
+---
+*Updated via release.sh on $(date -u '+%Y-%m-%d %H:%M UTC')*" \
+            --target "$target_sha"
+    fi
+    
+    echo ""
+    echo -e "${GREEN}✓ 'latest' release now points to ${target_version}${NC}"
+    echo ""
+    echo "Users can now download this version using:"
+    echo "  https://github.com/$(git remote get-url origin | sed -E 's|.*github.com[:/]||' | sed 's|.git$||')/releases/latest"
+}
+
 # Interactive mode
 interactive_mode() {
     clear
@@ -142,7 +250,7 @@ interactive_mode() {
                 exit 1
             fi
             
-            update_latest_tag "$TARGET_VERSION"
+            update_latest_release "$TARGET_VERSION"
             ;;
         3)
             exit 0
@@ -303,7 +411,7 @@ if [ "$MODE" = "set-latest" ]; then
         fi
     fi
     
-    update_latest_tag "$VERSION"
+    update_latest_release "$VERSION"
     
 elif [ -z "$VERSION" ]; then
     # No version provided - interactive mode

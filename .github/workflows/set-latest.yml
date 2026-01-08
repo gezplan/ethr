@@ -1,0 +1,96 @@
+name: Set Latest Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag to set as latest (e.g., v1.2.3)'
+        required: true
+        type: string
+      confirm:
+        description: 'Type "yes" to confirm'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  set-latest:
+    name: Update Latest Release
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.confirm == 'yes' }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all tags
+
+      - name: Validate version tag
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          
+          # Add 'v' prefix if not present
+          if [[ ! "$VERSION" =~ ^v ]]; then
+            VERSION="v${VERSION}"
+          fi
+          
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          
+          # Check if the tag exists
+          if ! git rev-parse "$VERSION" >/dev/null 2>&1; then
+            echo "::error::Tag $VERSION does not exist"
+            exit 1
+          fi
+          
+          # Check if a release exists for this tag
+          if ! gh release view "$VERSION" >/dev/null 2>&1; then
+            echo "::error::No release found for tag $VERSION"
+            exit 1
+          fi
+          
+          echo "✓ Found release for $VERSION"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download release assets
+        run: |
+          mkdir -p release-assets
+          gh release download "$VERSION" --dir release-assets
+          echo "Downloaded assets:"
+          ls -lh release-assets/
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update Latest Release
+        run: |
+          # Get the commit SHA for the version tag
+          TARGET_SHA=$(git rev-parse "$VERSION^{}")
+          
+          # Delete existing 'latest' release if it exists
+          echo "Removing existing 'latest' release..."
+          gh release delete latest --yes 2>/dev/null || true
+          
+          # Delete existing 'latest' tag if it exists
+          echo "Removing existing 'latest' tag..."
+          git push origin :refs/tags/latest 2>/dev/null || true
+          
+          # Create new 'latest' release pointing to the version's commit
+          echo "Creating new 'latest' release pointing to $VERSION..."
+          gh release create latest \
+            --title "Latest Release ($VERSION)" \
+            --notes "This release always points to the latest stable version.
+
+**Current Version:** $VERSION
+
+See the [versioned release](https://github.com/${{ github.repository }}/releases/tag/$VERSION) for full release notes.
+
+---
+*Updated manually via workflow on $(date -u '+%Y-%m-%d %H:%M UTC')*" \
+            --target "$TARGET_SHA" \
+            release-assets/*
+          
+          echo ""
+          echo "✓ 'latest' release now points to $VERSION"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
