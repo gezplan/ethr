@@ -125,11 +125,7 @@ jobs:
           # Create new 'latest' release pointing to the same commit as the version
           gh release create latest \
             --title "Latest Release ($VERSION)" \
-            --notes "This release always points to the latest stable version.
-
-**Current Version:** $VERSION
-
-See the [versioned release](https://github.com/${{ github.repository }}/releases/tag/$VERSION) for full release notes." \
+            --notes "This release always points to the latest stable version. Current Version: $VERSION. See the versioned release for full release notes." \
             --target ${{ github.sha }} \
             release-assets/*
         env:

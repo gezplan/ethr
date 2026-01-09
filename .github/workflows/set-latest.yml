@@ -79,14 +79,7 @@ jobs:
           echo "Creating new 'latest' release pointing to $VERSION..."
           gh release create latest \
             --title "Latest Release ($VERSION)" \
-            --notes "This release always points to the latest stable version.
-
-**Current Version:** $VERSION
-
-See the [versioned release](https://github.com/${{ github.repository }}/releases/tag/$VERSION) for full release notes.
-
----
-*Updated manually via workflow on $(date -u '+%Y-%m-%d %H:%M UTC')*" \
+            --notes "This release always points to the latest stable version. Current Version: $VERSION. See the versioned release for full release notes." \
             --target "$TARGET_SHA" \
             release-assets/*
           
