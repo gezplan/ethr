@@ -1,12 +1,18 @@
 #!/bin/bash
 
-# Release Management Script for ethr
+# Release Management Script for ethr (Unix/macOS version)
+# For Windows, use release.ps1 instead
+#
 # Usage: 
 #   ./release.sh                      # Interactive mode
 #   ./release.sh <version>            # Create release (non-interactive)
 #   ./release.sh <version> --latest   # Create release and set as latest
-#   ./release.sh --set-latest [version] # Only update latest tag
+#   ./release.sh --set-latest [version] # Only update latest release
 #   ./release.sh --list               # List versions and exit
+#
+# Requirements:
+#   - git
+#   - gh (GitHub CLI) - install via: brew install gh (macOS) or apt install gh (Linux)
 
 set -e
 
@@ -87,7 +93,7 @@ update_latest_tag() {
     echo "  https://github.com/$(git remote get-url origin | sed -E 's|.*github.com[:/]||' | sed 's|.git$||')/releases/latest"
 }
 
-# Function to update latest release (tag + GitHub release with binaries)
+# Function to update latest release (tag + GitHub release flag)
 update_latest_release() {
     local target_version=$1
     
@@ -127,72 +133,26 @@ update_latest_release() {
         return 1
     fi
     
-    echo -e "${GREEN}Updating 'latest' release to ${target_version}...${NC}"
+    echo -e "${GREEN}Setting ${target_version} as the latest release...${NC}"
     echo ""
     
-    # Create temp directory for assets
-    local tmp_dir=$(mktemp -d)
-    trap "rm -rf $tmp_dir" EXIT
-    
-    # Download assets from target release
-    echo "Downloading release assets from ${target_version}..."
-    if ! gh release download "$target_version" --dir "$tmp_dir" 2>/dev/null; then
-        echo -e "${YELLOW}Warning: Could not download assets (release may have no files yet)${NC}"
-    fi
-    
-    # Update git tag first
-    echo "Updating git tag..."
+    # Update git 'latest' tag to point to this version
+    echo "Updating git latest tag..."
     git tag -d latest 2>/dev/null || true
     git push origin :refs/tags/latest 2>/dev/null || true
     git tag latest "$target_version"
-    git push origin latest
+    git push origin latest 2>/dev/null || true
     
-    # Delete existing 'latest' release if it exists
-    echo "Removing existing 'latest' release..."
-    gh release delete latest --yes 2>/dev/null || true
-    
-    # Get the commit SHA for the version tag
-    local target_sha=$(git rev-parse "${target_version}^{}")
-    
-    # Create new 'latest' release
-    echo "Creating new 'latest' release..."
-    local asset_args=""
-    if [ -n "$(ls -A $tmp_dir 2>/dev/null)" ]; then
-        asset_args="$tmp_dir/*"
-    fi
-    
-    if [ -n "$asset_args" ]; then
-        gh release create latest \
-            --title "Latest Release ($target_version)" \
-            --notes "This release always points to the latest stable version.
-
-**Current Version:** $target_version
-
-See the [versioned release](https://github.com/$(git remote get-url origin | sed -E 's|.*github.com[:/]||' | sed 's|.git$||')/releases/tag/$target_version) for full release notes.
-
----
-*Updated via release.sh on $(date -u '+%Y-%m-%d %H:%M UTC')*" \
-            --target "$target_sha" \
-            $tmp_dir/*
-    else
-        gh release create latest \
-            --title "Latest Release ($target_version)" \
-            --notes "This release always points to the latest stable version.
-
-**Current Version:** $target_version
-
-See the [versioned release](https://github.com/$(git remote get-url origin | sed -E 's|.*github.com[:/]||' | sed 's|.git$||')/releases/tag/$target_version) for full release notes.
-
----
-*Updated via release.sh on $(date -u '+%Y-%m-%d %H:%M UTC')*" \
-            --target "$target_sha"
-    fi
+    # Mark the release as "latest" using GitHub's built-in feature
+    echo "Marking GitHub release as latest..."
+    gh release edit "$target_version" --latest
     
     echo ""
-    echo -e "${GREEN}✓ 'latest' release now points to ${target_version}${NC}"
+    echo -e "${GREEN}✓ ${target_version} is now the latest release${NC}"
     echo ""
     echo "Users can now download this version using:"
     echo "  https://github.com/$(git remote get-url origin | sed -E 's|.*github.com[:/]||' | sed 's|.git$||')/releases/latest"
+    echo "  (redirects to ${target_version})"
 }
 
 # Interactive mode
